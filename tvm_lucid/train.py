@@ -142,6 +142,9 @@ class Trainer:
             # much slower to schedule.  update_ema() flushes the update itself.
             lucid.eval(out.loss, out.terminal, out.flow_matching)
             (out.loss / len(micro)).backward()
+            # And the gradients before the optimiser reads them: left lazy, the
+            # whole backward graph ran inside AdamW's step, 3x slower.
+            lucid.eval(*(p.grad for p in model.parameters() if p.grad is not None))
             # One scalar read per micro-batch: it is also the non-finite guard,
             # and it lets the step time below mean something.
             totals["loss"] += float(out.loss.item()) / len(micro)

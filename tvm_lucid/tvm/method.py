@@ -213,7 +213,11 @@ class TVM(nn.Module):
         x_fm = (1.0 - s_b) * images + s_b * noise
         w_b = guidance.reshape(-1, 1, 1, 1)
 
+        # On Metal every op is lazy, and the objective is evaluated stage by
+        # stage: one graph spanning all of it held every stage's activations at
+        # once and ran 4x slower (195 s against 44 s per step, S/2, batch 64).
         velocity, terminal = self._terminal_velocity(x_t, t, s, labels, guidance)
+        lucid.eval(velocity, terminal)
         landing = (x_t + (s - t).reshape(-1, 1, 1, 1) * velocity).detach()
 
         # Both targets from θ* in one batch: the field where the jump lands
@@ -227,9 +231,11 @@ class TVM(nn.Module):
                 lucid.cat([labels, null], dim=0),
                 lucid.cat([guidance, lucid.ones_like(guidance)], dim=0),
             )
+        lucid.eval(reads)
         terminal_target, unconditional = reads[:batch], reads[batch:]
 
         velocity_fm = self.net(x_fm, s_fm, s_fm, labels, guidance)
+        lucid.eval(velocity_fm)
         guided = w_b * (noise - images) + (1.0 - w_b) * unconditional
 
         # The released loss drops the terminal term where isclose(s, t) — with
