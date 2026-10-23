@@ -1,0 +1,28 @@
+# Minutes-long end-to-end check of the whole pipeline: train, log, checkpoint,
+# grids, probe, FID.  Run this first on a new machine.
+name = "debug"
+seed = 0
+
+[data]
+root = "~/datasets"
+
+[model]
+hidden_size = 64
+depth = 2
+num_heads = 2
+eval_ema_decay = 0.99
+
+[train]
+batch_size = 32
+epochs = 1
+hours = 0.25
+log_every = 5
+dynamics_every = 20
+keep_every_epochs = 1
+
+[eval]
+nfe = [1, 2]
+probe_batch = 64
+fid_every_epochs = 1
+fid_samples = 500
+fid_nfe = [1]

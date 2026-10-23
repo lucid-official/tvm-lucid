@@ -1,0 +1,27 @@
+[project]
+name = "tvm-lucid"
+version = "0.1.0"
+description = "Terminal Velocity Matching (Zhou et al., ICLR 2026) experiments on Lucid"
+requires-python = ">=3.14"
+# Lucid itself comes from the local checkout (~/Desktop/Programming/lucid);
+# see README.md for how this project uses its environment.
+dependencies = ["numpy", "tqdm", "pillow", "matplotlib"]
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff", "scipy"]
+
+[tool.setuptools.packages.find]
+include = ["tvm_lucid*"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "UP", "I"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["tvm_lucid"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

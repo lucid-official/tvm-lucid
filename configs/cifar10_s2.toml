@@ -1,0 +1,47 @@
+# TVM on class-conditional CIFAR-10, pixel space, S/2-sized backbone (~33M params).
+# The objective, EMAs and samplers are the paper's (Table 6 column 1) unless set here.
+name = "cifar10_s2"
+seed = 0
+
+[data]
+root = "~/datasets"        # CIFAR-10 is downloaded here on first use
+flip = true                # horizontal flips; the paper's ImageNet runs use none
+
+[model]                    # any lucid.models.generative.tvm.TVMConfig field
+hidden_size = 384
+depth = 12
+num_heads = 6
+patch_size = 2
+guidance_scale = 2.0       # constant CFG w trained at (paper: 2.0 best one-step)
+target_ema_decay = 0.99    # θ*  (Table 4b)
+eval_ema_decay = 0.999     # θ** (paper 0.9999 over 300k steps; shorter run here)
+# time_sampler = "gap"     # gap* with (−0.8, 1.0), (−0.4, 1.0) is the default
+# scaled_parameterization = true
+
+[train]
+batch_size = 64
+grad_accum = 1
+lr = 1e-4
+betas = [0.9, 0.95]        # β2 = 0.95 (Section 4)
+eps = 1e-8
+weight_decay = 0.0
+grad_clip = 0.0            # paper clips at 1.0 only for 512 px
+epochs = 400
+hours = 84.0               # wall-clock budget; stops cleanly and checkpoints
+log_every = 25             # optimiser steps between metrics.jsonl rows
+dynamics_every = 200       # steps between grad/param/EMA/activation probes
+keep_every_epochs = 10     # also keep ckpt/epoch_XXXX.lucid this often
+max_nonfinite = 10
+
+[eval]
+every_epochs = 1           # grids + flow-map gap + per-time probe
+nfe = [1, 2, 4]
+grid_noise_seed = 1234
+probe_batch = 256
+probe_buckets = 10
+probe_seed = 4321
+fid_every_epochs = 5
+fid_samples = 5000
+fid_nfe = [1, 2]
+fid_batch = 250
+sample_batch = 500
