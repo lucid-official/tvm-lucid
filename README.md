@@ -147,19 +147,29 @@ implementations and compares outputs, losses and gradients. The PyPI release ski
 
 ## The CIFAR-10 run
 
-| | |
-|---|---|
-| data | CIFAR-10 train split, 50k images, pixel space 32×32 in [−1, 1], horizontal flips |
-| backbone | S/2: width 384, depth 12, 6 heads, patch 2 → 256 tokens, **32.97M** parameters |
-| guidance | constant $w = 2$ (the paper's best one-step weight), class dropout 0.1 |
-| times | gap*: gap ~ logit-N(−0.8, 1), $s$ ~ logit-N(−0.4, 1) truncated, separate flow-matching time |
-| EMAs | $\theta^*$ 0.99 (Table 4b), $\theta^{**}$ 0.999 (paper: 0.9999 over a much longer run) |
-| optimiser | AdamW, lr 1e-4, β = (0.9, 0.95), batch 64, no clipping, no weight decay |
-| budget | 84 h of wall clock on a Mac Studio M4 Max (36 GB), stopping cleanly with a checkpoint |
+The training hyperparameters are the released ImageNet-256 recipe
+([`configs/im256_w2.yaml`](https://github.com/lumalabs/tvm/blob/main/configs/im256_w2.yaml)) wherever it carries
+over. Only the data, the backbone and the batch differ:
 
-Everything in the table is one line of [`configs/cifar10_s2.toml`](configs/cifar10_s2.toml), and every `TVMConfig`
-field can be set under `[model]`. Compared with the paper's ImageNet setting, this run is in pixel space rather than
-SD-VAE latent space, uses a smaller backbone, uses a shorter evaluation EMA, and adds flips.
+| | this run | released (ImageNet-256, `im256_w2`) |
+|---|---|---|
+| data | CIFAR-10 train split, 50k images, pixels in [−1, 1], no flips | SD-VAE latents, no flips |
+| backbone | S/2: width 384, depth 12, 6 heads, patch 2 → 256 tokens, **32.97M** | XL/2: 1152, 28, 18 heads → 256 tokens, 678M |
+| optimiser | AdamW, lr 1e-4, β = (0.9, 0.95), eps 1e-8, no weight decay, no clipping | same |
+| batch | **64** | **2048** |
+| guidance | constant $w = 2$, label dropout 0.1, scaled parameterisation | same |
+| times | gap*: gap ~ logit-N(−0.8, 1), $s$ ~ logit-N(−0.4, 1) truncated | same |
+| EMAs | $\theta^*$ 0.99, $\theta^{**}$ 0.9999 | same |
+| init | spectral, time embeddings included | same |
+| budget | 84 h on a Mac Studio M4 Max (36 GB): about 82k steps at 3.7 s, about 100 epochs | — |
+
+**Why the batch is not 2048.** Accumulating 2048 here would take about 2 minutes per step, or about 2.5k steps in
+the budget. The evaluation EMA alone averages over about 10k steps ($1/(1-0.9999)$), so it would never leave its
+initial weights. At 64 the same budget gives about 82k steps. The recipe's per-step values carry over unchanged,
+but its guarantees were measured at its own batch, data and model.
+
+Everything in the table is one line of [`configs/cifar10_s2.toml`](configs/cifar10_s2.toml), where each value names
+the released field it copies. Every `TVMConfig` field can be set under `[model]`.
 
 ### What gets measured
 

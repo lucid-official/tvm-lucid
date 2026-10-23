@@ -1,32 +1,48 @@
 # TVM on class-conditional CIFAR-10, pixel space, S/2-sized backbone (~33M params).
-# The objective, EMAs and samplers are the paper's (Table 6 column 1) unless set here.
+#
+# Training hyperparameters are the released ImageNet-256 recipe
+# (github.com/lumalabs/tvm, configs/im256_w2.yaml) wherever they carry over:
+# AdamW lr 1e-4, betas (0.9, 0.95), eps 1e-8, no weight decay, no clipping,
+# EMA 0.99 for the targets and 0.9999 for evaluation, w = 2, label dropout 0.1,
+# the gap* time sampler, no flips.  What cannot carry over is set apart below:
+# the data and the backbone, and the batch — 2048 there, 64 here.
 name = "cifar10_s2"
 seed = 0
 
 [data]
 root = "~/datasets"        # CIFAR-10 is downloaded here on first use
-flip = true                # horizontal flips; the paper's ImageNet runs use none
+flip = false               # released: xflip: false
 
-[model]                    # any tvm_lucid.tvm.TVMConfig field
+[model]                    # any tvm_lucid.tvm.TVMConfig field; unset = the paper's default
+# not the paper's: CIFAR-10 is 32x32 pixels, so a small backbone (XL/2 is 1152 / 28 / 18)
 hidden_size = 384
 depth = 12
 num_heads = 6
 patch_size = 2
-guidance_scale = 2.0       # constant CFG w trained at (paper: 2.0 best one-step)
-target_ema_decay = 0.99    # θ*  (Table 4b)
-eval_ema_decay = 0.999     # θ** (paper 0.9999 over 300k steps; shorter run here)
+# the paper's values, spelled out
+guidance_scale = 2.0       # released: loss.cfg 2.0
+class_dropout = 0.1        # released: loss.label_dropout 0.1
+target_ema_decay = 0.99    # released: training.ema_target_beta 0.99 (θ*)
+eval_ema_decay = 0.9999    # released: training.ema_beta 0.9999 (θ**)
+time_sampler = "gap"       # released: gap_P (−0.8, 1.0), s_P (−0.4, 1.0)
+time_embedding_init = "spectral"  # released: time_specinit: true
+scaled_parameterization = true    # released: do_scale_param: true
+detach_jvp = false         # released: detach_jvp: false
+# engineering, not the method
 gradient_checkpointing = true  # 51 GiB of activations at batch 64 otherwise
-# time_sampler = "gap"     # gap* with (−0.8, 1.0), (−0.4, 1.0) is the default
-# scaled_parameterization = true
 
 [train]
+# not the paper's: released batch_size 2048 (on GPUs).  At 2048 by accumulation one
+# step would take ~2 min here, ~2.5k steps in the budget — too few for θ**'s 0.9999.
 batch_size = 64
 grad_accum = 1
-lr = 1e-4
-betas = [0.9, 0.95]        # β2 = 0.95 (Section 4)
-eps = 1e-8
-weight_decay = 0.0
-grad_clip = 0.0            # paper clips at 1.0 only for 512 px
+# the paper's values
+lr = 1e-4                  # released: optimizer.lr
+betas = [0.9, 0.95]        # released: optimizer.betas
+eps = 1e-8                 # released: optimizer.eps
+weight_decay = 0.0         # released: optimizer.weight_decay
+grad_clip = 0.0            # released: none at 256 px (max_grad_norm 1.0 only at 512 px)
+# the run
 epochs = 400
 hours = 84.0               # wall-clock budget; stops cleanly and checkpoints
 log_every = 25             # optimiser steps between metrics.jsonl rows
@@ -36,7 +52,7 @@ max_nonfinite = 10
 
 [eval]
 every_epochs = 1           # grids + flow-map gap + per-time probe
-nfe = [1, 2, 4]
+nfe = [1, 2, 4]            # released: sampling 1, 2 and 4 steps
 grid_noise_seed = 1234
 probe_batch = 256
 probe_buckets = 10
