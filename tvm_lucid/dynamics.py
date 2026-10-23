@@ -25,11 +25,12 @@ from collections import defaultdict
 from typing import Any
 
 import lucid
-import lucid.models as M
 import lucid.nn as nn
 from lucid import Tensor
 
-_BLOCK = re.compile(r"^tvm\.blocks\.(\d+)\.")
+from tvm_lucid.tvm import TVM
+
+_BLOCK = re.compile(r"^net\.blocks\.(\d+)\.")
 
 
 def group_of(name: str) -> str:
@@ -37,7 +38,7 @@ def group_of(name: str) -> str:
     match = _BLOCK.match(name)
     if match:
         return f"blocks.{int(match.group(1)):02d}"
-    if name.startswith("tvm.final."):
+    if name.startswith("net.final."):
         return "final"
     return "embed"
 
@@ -46,7 +47,7 @@ def _sq(t: Tensor) -> Tensor:
     return (t.detach().float() ** 2).sum()
 
 
-def grouped_norms(model: M.TVMForImageGeneration) -> dict[str, dict[str, float]]:
+def grouped_norms(model: TVM) -> dict[str, dict[str, float]]:
     """Per-group and global L2 norms of parameters and gradients."""
     params: dict[str, list[Tensor]] = defaultdict(list)
     grads: dict[str, list[Tensor]] = defaultdict(list)
@@ -69,10 +70,10 @@ def grouped_norms(model: M.TVMForImageGeneration) -> dict[str, dict[str, float]]
     return out
 
 
-def snapshot(model: M.TVMForImageGeneration) -> dict[str, Tensor]:
+def snapshot(model: TVM) -> dict[str, Tensor]:
     """A detached copy of the live weights, to measure one step's update."""
     with lucid.no_grad():
-        return {n: p.detach().clone() for n, p in model.tvm.named_parameters()}
+        return {n: p.detach().clone() for n, p in model.net.named_parameters()}
 
 
 def _relative_distance(a: dict[str, Tensor], b: dict[str, Tensor]) -> float:
@@ -82,15 +83,15 @@ def _relative_distance(a: dict[str, Tensor], b: dict[str, Tensor]) -> float:
     return math.sqrt(diff / max(base, 1e-30))
 
 
-def update_ratio(before: dict[str, Tensor], model: M.TVMForImageGeneration) -> float:
+def update_ratio(before: dict[str, Tensor], model: TVM) -> float:
     """``||θ_after − θ_before|| / ||θ_before||``."""
-    after = {n: p for n, p in model.tvm.named_parameters()}
+    after = {n: p for n, p in model.net.named_parameters()}
     return _relative_distance(after, before)
 
 
-def ema_drift(model: M.TVMForImageGeneration) -> dict[str, float]:
+def ema_drift(model: TVM) -> dict[str, float]:
     """How far each EMA sits from the live weights, relative to their size."""
-    live = {n: p for n, p in model.tvm.named_parameters()}
+    live = {n: p for n, p in model.net.named_parameters()}
     out: dict[str, float] = {}
     if model.config.target_ema_decay > 0.0:
         out["target"] = _relative_distance(dict(model.target_network.named_parameters()), live)
@@ -136,9 +137,9 @@ class ActivationProbe:
             handle.remove()
 
 
-def activation_probe(model: M.TVMForImageGeneration) -> ActivationProbe:
+def activation_probe(model: TVM) -> ActivationProbe:
     """Figure 4's quantities: the time embedding and the last raw modulation."""
-    net = model.tvm
+    net = model.net
     return ActivationProbe(
         {
             "time_embed": net.time_embed,

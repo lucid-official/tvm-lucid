@@ -1,10 +1,10 @@
 """Train TVM on CIFAR-10: ``python -m tvm_lucid.train --config configs/cifar10_s2.toml``.
 
 Algorithm 1 of the paper, one optimiser step at a time: the objective
-(``TVMForImageGeneration.forward``), the optimiser, then both EMAs
-(``update_ema``).  Around it: deterministic resumable data, tqdm bars,
-JSONL logs of the training dynamics, end-of-epoch evaluation, atomic
-checkpoints, a wall-clock budget, and a guard against non-finite losses.
+(``TVM.forward``), the optimiser, then both EMAs (``TVM.update_ema``).
+Around it: deterministic resumable data, tqdm bars, JSONL logs of the
+training dynamics, end-of-epoch evaluation, atomic checkpoints, a
+wall-clock budget, and a guard against non-finite losses.
 
     # measure (≈2 min), then decide batch size / budget
     python -m tvm_lucid.train --config configs/cifar10_s2.toml --benchmark
@@ -141,8 +141,8 @@ class Trainer:
             # One scalar read per micro-batch: it is also the non-finite guard,
             # and it lets the step time below mean something.
             totals["loss"] += float(out.loss.item()) / len(micro)
-            totals["terminal"] += float(out.terminal_loss.item()) / len(micro)
-            totals["fm"] += float(out.flow_matching_loss.item()) / len(micro)
+            totals["terminal"] += float(out.terminal.item()) / len(micro)
+            totals["fm"] += float(out.flow_matching.item()) / len(micro)
 
         record: dict[str, Any] = dict(totals)
         if not math.isfinite(totals["loss"]):
@@ -155,7 +155,9 @@ class Trainer:
         self.nonfinite_streak = 0
 
         if tc.grad_clip > 0:
-            record["grad_norm_preclip"] = float(clip_grad_norm_(model.parameters(), tc.grad_clip).item())
+            record["grad_norm_preclip"] = float(
+                clip_grad_norm_(model.parameters(), tc.grad_clip).item()
+            )
         if dynamics:
             norms = grouped_norms(model)
         self.opt.step()
@@ -217,7 +219,9 @@ class Trainer:
                     record = self.step(micro, dynamics)
                     micro = []
                     if record.get("skipped"):
-                        logs["events"].write({"event": "nonfinite_skip", "global_step": self.global_step, **record})
+                        logs["events"].write(
+                            {"event": "nonfinite_skip", "global_step": self.global_step, **record}
+                        )
                         if self.nonfinite_streak >= tc.max_nonfinite:
                             stop_reason = f"{self.nonfinite_streak} non-finite losses in a row"
                             break
@@ -242,7 +246,9 @@ class Trainer:
                         }
                         logs["metrics"].write(row)
                         if dyn is not None:
-                            logs["metrics"].write({"kind": "dynamics", "global_step": self.global_step, **dyn})
+                            logs["metrics"].write(
+                                {"kind": "dynamics", "global_step": self.global_step, **dyn}
+                            )
                         bar.set_postfix(
                             loss=f"{record['loss']:.4f}",
                             term=f"{record['terminal']:.4f}",

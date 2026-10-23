@@ -1,12 +1,18 @@
-"""Terminal Velocity Matching — the equations the method rests on.
+"""Terminal Velocity Matching — the equations the implementation rests on.
 
-These check *the method*, not the library's model-zoo contract (which lives
-in Lucid's own shared test suites): the terminal velocity is the
-``s``-derivative of the displacement, the gradient runs through the JVP,
-the semi-Lipschitz block is invariant to its modulation's scale, the scaled
-parameterisation multiplies by ``w``, both EMAs follow Algorithm 1, and the
-sampler is Figure 3.  They need Lucid (Apple Silicon) and are skipped
-elsewhere.
+* the network's forward-mode stream is the derivative along ``s`` (against a
+  central finite difference) and the gradient flows through it (against a
+  finite difference in weight space);
+* the semi-Lipschitz block is invariant to its modulation's scale, and the
+  untrained field is exactly zero (adaLN-Zero);
+* the scaled parameterisation multiplies by ``w``;
+* the time samplers keep ``s <= t``, the terminal term vanishes at ``s = t``;
+* both EMAs follow Algorithm 1 and stay out of the state dict;
+* the sampler is Figure 3's jumps;
+* and, where Lucid's development checkout provides
+  ``lucid.models.generative.tvm``, the two implementations agree.
+
+They need Lucid (Apple Silicon) and are skipped elsewhere.
 """
 
 import math
@@ -17,373 +23,313 @@ pytest.importorskip("lucid")
 
 import lucid  # noqa: E402
 import lucid.linalg  # noqa: E402
-from lucid.models import DiffusionModelOutput  # noqa: E402
-from lucid.models.generative.tvm import (  # noqa: E402
-    TVMConfig,
-    TVMForImageGeneration,
-    TVMModel,
-)
+import lucid.optim  # noqa: E402
+from lucid import Tensor  # noqa: E402
+
+from tvm_lucid.tvm import TVM, TVMConfig, TVMNet  # noqa: E402
+
+
+def _devices() -> list[str]:
+    try:
+        import lucid.metal
+
+        return ["cpu", "metal"] if lucid.metal.is_available() else ["cpu"]
+    except ImportError, AttributeError:
+        return ["cpu"]
+
+
+DEVICES = _devices()
 
 
 def _tiny(**overrides: object) -> TVMConfig:
-    """A model small enough to instantiate per test."""
-    base = dict(
-        sample_size=8,
-        patch_size=2,
-        hidden_size=32,
-        depth=2,
-        num_heads=4,
-        num_classes=10,
-    )
+    base: dict[str, object] = dict(
+        sample_size=8, in_channels=3, out_channels=3, patch_size=2, hidden_size=32,
+        depth=2, num_heads=4, num_classes=10, frequency_embedding_size=32,
+    )  # fmt: skip
     base.update(overrides)
     return TVMConfig(**base)  # type: ignore[arg-type]
 
 
-def _wake(model: TVMModel) -> None:
-    """Undo adaLN-Zero so the conditioning reaches the output.
-
-    The modulation projections and the decoder start at zero, which makes
-    the untrained field identically zero — any test *about* the
-    conditioning has to break that first.
-    """
+def _wake(net: TVMNet, scale: float = 0.3) -> TVMNet:
+    """Randomise every weight: adaLN-Zero makes the untrained field identically
+    zero, so anything *about* the conditioning has to break that first."""
     with lucid.no_grad():
-        for block in model.blocks:
-            linear = block.ada_ln[1]
-            linear.weight += lucid.randn(linear.weight.shape) * 0.5
-        final_linear = model.final.ada_ln[1]
-        final_linear.weight += lucid.randn(final_linear.weight.shape) * 0.5
-        model.final.proj.weight += lucid.randn(model.final.proj.weight.shape) * 0.5
+        for param in net.parameters():
+            param.copy_(lucid.randn(tuple(param.shape), device=param.device.type) * scale)
+    return net
 
 
-def _gap(a: lucid.Tensor, b: lucid.Tensor) -> float:
-    return float((a - b).abs().max().item())
+def _inputs(device: str, batch: int = 3) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+    x = lucid.randn((batch, 3, 8, 8), device=device)
+    t = lucid.tensor([0.9, 0.6, 0.35][:batch], device=device)
+    s = lucid.tensor([0.2, 0.5, 0.3][:batch], device=device)
+    labels = lucid.tensor([1, 4, 10][:batch], device=device)
+    w = lucid.tensor([2.0, 1.5, 1.0][:batch], device=device)
+    return x, t, s, labels, w
+
+
+def _max(a: Tensor) -> float:
+    return float(a.abs().max().item())
+
+
+# ── the network and its derivative along s ───────────────────────────────
 
 
 class TestNetwork:
     def test_the_untrained_field_is_exactly_zero(self) -> None:
-        """adaLN-Zero and a zero decoder: the field starts at zero.
-
-        A non-zero start means one of the zero-initialised projections was
-        given the spectral initialisation instead.
-        """
-        model = TVMModel(_tiny()).eval()
-        out = model(
-            lucid.randn((2, 4, 8, 8)),
-            lucid.tensor([1.0, 0.7]),
-            lucid.tensor([0.0, 0.2]),
-            lucid.tensor([1, 3]),
-        )
-        assert isinstance(out, DiffusionModelOutput) and out.loss is None
-        assert float(out.sample.abs().max().item()) == 0.0
+        net = TVMNet(_tiny()).eval()
+        x, t, s, labels, w = _inputs("cpu")
+        assert _max(net(x, t, s, labels, w)) == 0.0
 
     def test_linear_layers_start_at_unit_spectral_norm(self) -> None:
-        """Table 6's "Spectral" initialisation: largest singular value one."""
-        model = TVMModel(_tiny())
-        block = model.blocks[0]
-        for linear in (block.attn.qkv, block.attn.proj, block.mlp.fc1, block.mlp.fc2):
-            sigma = float(lucid.linalg.svdvals(linear.weight)[0].item())
-            assert abs(sigma - 1.0) < 1e-4, sigma
-        patch = model.patch_embed.weight
-        sigma = float(lucid.linalg.svdvals(patch.reshape(patch.shape[0], -1))[0].item())
-        assert abs(sigma - 1.0) < 1e-4, sigma
+        net = TVMNet(_tiny())
+        for weight in (net.blocks[0].attn.qkv.weight, net.blocks[1].mlp.fc2.weight):
+            sigma = float(lucid.linalg.svdvals(weight)[0].item())
+            assert math.isclose(sigma, 1.0, rel_tol=1e-4)
 
-    def test_time_embedding_init_follows_the_config(self) -> None:
-        """``"spectral"`` normalises the time MLPs; ``"normal"`` leaves 0.02."""
-        spectral = TVMModel(_tiny(time_embedding_init="spectral"))
-        normal = TVMModel(_tiny(time_embedding_init="normal"))
-        sigma = float(lucid.linalg.svdvals(spectral.time_embed.fc1.weight)[0].item())
-        assert abs(sigma - 1.0) < 1e-4
-        std = float(normal.time_embed.fc1.weight.std().item())
-        assert 0.015 < std < 0.025, std
+    @pytest.mark.parametrize("device", DEVICES)
+    def test_jvp_primal_is_the_forward(self, device: str) -> None:
+        lucid.manual_seed(0)
+        net = _wake(TVMNet(_tiny()).to(device)).eval()
+        x, t, s, labels, w = _inputs(device)
+        with lucid.no_grad():
+            out, _ = net.jvp_s(x, t, s, labels, w)
+            ref = net(x, t, s, labels, w)
+        assert _max(out - ref) <= 1e-4 * _max(ref)
 
-    def test_modulation_norm_removes_the_modulation_scale(self) -> None:
-        """Eq. 16: every shift, scale and gate is RMS-normalised.
+    @pytest.mark.parametrize("device", DEVICES)
+    def test_tangent_is_the_derivative_along_s(self, device: str) -> None:
+        lucid.manual_seed(1)
+        net = _wake(TVMNet(_tiny()).to(device)).eval()
+        x, t, s, labels, w = _inputs(device)
+        h = 3e-3
+        with lucid.no_grad():
+            _, along_s = net.jvp_s(x, t, s, labels, w)
+            fd = (net(x, t, s + h, labels, w) - net(x, t, s - h, labels, w)) / (2 * h)
+        assert _max(fd) > 1e-2  # the check is not vacuous
+        assert _max(along_s - fd) <= 2e-3 * _max(fd) + 1e-4
 
-        With the biases at zero, scaling a block's modulation projection
-        scales every modulation vector, which the norm divides back out —
-        the output must not move.  Without the norm it must, which is the
-        unbounded Lipschitz constant the paper removes.
-        """
-        for normalized in (True, False):
-            lucid.manual_seed(0)
-            model = TVMModel(_tiny(modulation_norm=normalized)).eval()
-            _wake(model)
-            x, labels = lucid.randn((1, 4, 8, 8)), lucid.tensor([2])
-            t, s = lucid.tensor([0.9]), lucid.tensor([0.3])
-            # Under no_grad, so no forward keeps the weight for backward —
-            # the engine refuses an in-place write to a saved tensor.
+    def test_the_gradient_flows_through_the_tangent(self) -> None:
+        """d/dθ ⟨∂u/∂s, R⟩ against a central difference in weight space."""
+        lucid.manual_seed(2)
+        net = _wake(TVMNet(_tiny())).eval()
+        x, t, s, labels, w = _inputs("cpu")
+        probe = lucid.randn((3, 3, 8, 8))
+        weight = net.blocks[0].attn.qkv.weight
+        direction = lucid.randn(tuple(weight.shape))
+
+        _, along_s = net.jvp_s(x, t, s, labels, w)
+        (along_s * probe).sum().backward()
+        analytic = float((weight.grad * direction).sum().item())
+
+        original = weight.detach().clone()
+
+        def objective(shift: float) -> float:
             with lucid.no_grad():
-                before = model(x, t, s, labels).sample
-                model.blocks[0].ada_ln[1].weight *= 10.0
-                after = model(x, t, s, labels).sample
-            if normalized:
-                assert _gap(before, after) < 1e-4
-            else:
-                assert _gap(before, after) > 1e-3
+                weight.copy_(original + direction * shift)
+                return float((net.jvp_s(x, t, s, labels, w)[1] * probe).sum().item())
 
-    def test_the_field_reads_the_interval_and_the_guidance(self) -> None:
-        """Holding ``t``, moving ``s`` or ``w`` must move the output."""
-        model = TVMModel(_tiny(scaled_parameterization=False)).eval()
-        _wake(model)
-        x, labels, t = lucid.randn((1, 4, 8, 8)), lucid.tensor([2]), lucid.tensor([0.9])
-        a = model(x, t, lucid.tensor([0.1]), labels, 2.0).sample
-        b = model(x, t, lucid.tensor([0.5]), labels, 2.0).sample
-        c = model(x, t, lucid.tensor([0.1]), labels, 1.5).sample
-        assert _gap(a, b) > 1e-6, "the field ignores s"
-        assert _gap(a, c) > 1e-6, "the field ignores w"
+        h = 1e-2
+        numeric = (objective(h) - objective(-h)) / (2 * h)
+        with lucid.no_grad():
+            weight.copy_(original)
+        assert abs(numeric) > 1e-2
+        assert abs(analytic - numeric) <= 2e-2 * abs(numeric)
 
-    def test_the_scaled_parameterization_is_a_factor_of_w(self) -> None:
-        """Section 4: ``u = w F`` under the scaled parameterisation."""
-        scaled = TVMModel(_tiny(scaled_parameterization=True)).eval()
-        _wake(scaled)
-        plain = TVMModel(_tiny(scaled_parameterization=False)).eval()
+    def test_the_block_is_invariant_to_its_modulation_scale(self) -> None:
+        """Eq. 16: each shift, scale and gate is RMS-normalised, so scaling the
+        modulation projection (weight and bias) changes nothing."""
+        lucid.manual_seed(3)
+        net = _wake(TVMNet(_tiny())).eval()
+        x, t, s, labels, w = _inputs("cpu")
+        with lucid.no_grad():
+            before = net(x, t, s, labels, w)
+            for linear in [block.ada_ln[1] for block in net.blocks] + [net.final.ada_ln[1]]:
+                linear.weight.copy_(linear.weight * 7.0)
+                linear.bias.copy_(linear.bias * 7.0)
+            after = net(x, t, s, labels, w)
+        assert _max(after - before) <= 1e-4 * _max(before)
+
+    def test_without_the_modulation_norm_the_scale_matters(self) -> None:
+        lucid.manual_seed(3)
+        net = _wake(TVMNet(_tiny(modulation_norm=False))).eval()
+        x, t, s, labels, w = _inputs("cpu")
+        with lucid.no_grad():
+            before = net(x, t, s, labels, w)
+            linear = net.final.ada_ln[1]
+            linear.weight.copy_(linear.weight * 7.0)
+            after = net(x, t, s, labels, w)
+        assert _max(after - before) > 1e-2 * _max(before)
+
+    def test_the_scaled_parameterisation_multiplies_by_w(self) -> None:
+        lucid.manual_seed(4)
+        scaled = _wake(TVMNet(_tiny())).eval()
+        plain = TVMNet(_tiny(scaled_parameterization=False)).eval()
         plain.load_state_dict(scaled.state_dict())
-        x, labels = lucid.randn((2, 4, 8, 8)), lucid.tensor([1, 4])
-        t, s = lucid.tensor([0.8, 0.6]), lucid.tensor([0.2, 0.0])
-        w = lucid.tensor([1.75, 2.5])
-        gap = _gap(
-            scaled(x, t, s, labels, w).sample,
-            plain(x, t, s, labels, w).sample * w.reshape(-1, 1, 1, 1),
-        )
-        assert gap < 1e-5
+        x, t, s, labels, w = _inputs("cpu")
+        with lucid.no_grad():
+            gap = scaled(x, t, s, labels, w) - plain(x, t, s, labels, w) * w.reshape(-1, 1, 1, 1)
+        assert _max(gap) <= 1e-5
 
-    def test_no_label_is_the_null_label_at_unit_guidance(self) -> None:
-        """``None`` is index ``num_classes`` and, by default, ``w = 1``."""
-        model = TVMModel(_tiny()).eval()
-        _wake(model)
-        x, t, s = lucid.randn((1, 4, 8, 8)), lucid.tensor([1.0]), lucid.tensor([0.0])
-        implicit = model(x, t, s).sample
-        explicit = model(x, t, s, lucid.tensor([10]), 1.0).sample
-        assert _gap(implicit, explicit) < 1e-6
-        assert model.resolve_guidance(None, None) == 1.0
-        assert model.resolve_guidance(None, lucid.tensor([3])) == 2.0
+    def test_no_label_means_the_null_label_at_unit_weight(self) -> None:
+        lucid.manual_seed(5)
+        net = _wake(TVMNet(_tiny())).eval()
+        x, t, s, _, _ = _inputs("cpu")
+        null = lucid.full((3,), 10, dtype=lucid.int64)
+        with lucid.no_grad():
+            gap = net(x, t, s) - net(x, t, s, null, lucid.ones((3,)))
+        assert _max(gap) == 0.0
+
+
+# ── the objective ────────────────────────────────────────────────────────
 
 
 class TestObjective:
     @pytest.mark.parametrize("sampler", ["gap", "trunc", "clamp"])
-    def test_s_never_exceeds_t(self, sampler: str) -> None:
-        """Every sampler of Table 3 returns ``0 <= s <= t <= 1``."""
-        model = TVMForImageGeneration(_tiny(time_sampler=sampler))
-        t, s, s_fm = model._sample_times(256, "cpu")
-        assert bool((s <= t).all().item())
-        assert bool((s >= 0.0).all().item()) and bool((t <= 1.0).all().item())
-        assert bool(((s_fm > 0.0) & (s_fm < 1.0)).all().item())
+    def test_time_samplers_keep_s_below_t(self, sampler: str) -> None:
+        lucid.manual_seed(6)
+        model = TVM(_tiny(time_sampler=sampler))
+        t, s, s_fm = model.sample_times(20_000, "cpu")
+        assert float((s - t).max().item()) <= 1e-6
+        for times in (t, s, s_fm):
+            assert 0.0 <= float(times.min().item()) and float(times.max().item()) <= 1.0
 
-    def test_gap_star_draws_the_flow_matching_time_separately(self) -> None:
-        """``gap*`` (the default) decouples the Flow Matching time from ``s``."""
-        star = TVMForImageGeneration(_tiny(separate_flow_matching_time=True))
-        _, s, s_fm = star._sample_times(64, "cpu")
-        assert float((s != s_fm).float().mean().item()) > 0.95
-        plain = TVMForImageGeneration(_tiny(separate_flow_matching_time=False))
-        _, s, s_fm = plain._sample_times(64, "cpu")
-        assert bool((s == s_fm).all().item())
+    def test_random_guidance_draws_the_reciprocal_uniformly(self) -> None:
+        lucid.manual_seed(7)
+        model = TVM(_tiny(guidance_range=(1.5, 3.0)))
+        beta = 1.0 / model.sample_guidance(20_000, "cpu")
+        assert float(beta.min().item()) >= 1.0 / 3.0 - 1e-6
+        assert float(beta.max().item()) <= 1.0 / 1.5 + 1e-6
+        assert abs(float(beta.mean().item()) - 0.5 * (1.0 / 1.5 + 1.0 / 3.0)) < 5e-3
 
-    def test_guidance_range_draws_within_its_bounds(self) -> None:
-        """Random guidance stays inside ``[w_min, w_max]``."""
-        model = TVMForImageGeneration(_tiny(guidance_range=(1.5, 3.0)))
-        w = model._sample_guidance(512, "cpu")
-        assert float(w.min().item()) >= 1.5 - 1e-5
-        assert float(w.max().item()) <= 3.0 + 1e-5
+    def test_the_terminal_term_vanishes_when_s_equals_t(self) -> None:
+        lucid.manual_seed(8)
+        model = TVM(_tiny(ratio_t_equals_s=1.0))
+        _wake(model.net)
+        out = model(lucid.randn((4, 3, 8, 8)).clamp(-1.0, 1.0), lucid.tensor([0, 1, 2, 3]))
+        assert float(out.terminal.item()) == 0.0
+        assert float(out.flow_matching.item()) > 0.0
 
-    def test_the_terminal_velocity_is_the_s_derivative_of_the_displacement(
-        self,
+    @pytest.mark.parametrize("device", DEVICES)
+    @pytest.mark.parametrize("detach_jvp", [False, True])
+    def test_a_training_step_is_finite_and_moves_the_weights(
+        self, device: str, detach_jvp: bool
     ) -> None:
-        """Eq. 17: ``d/ds f = F + (s - t) ∂_s F`` along ``s`` alone.
-
-        Checked against a central finite difference of the displacement
-        ``f(s) = (s - t) u(x_t, t, s)``.  A JVP taken along ``t`` or
-        ``x_t`` instead returns a finite quantity of the right shape and
-        fails this.
-        """
-        model = TVMForImageGeneration(_tiny())
-        _wake(model.tvm)
-        x = lucid.randn((2, 4, 8, 8))
-        t, s = lucid.tensor([0.9, 0.7]), lucid.tensor([0.4, 0.1])
-        labels, w = lucid.tensor([1, 5]), lucid.tensor([2.0, 2.0])
-        _, terminal = model._terminal_velocity(x, t, s, labels, w)
-
-        def displacement(s_: lucid.Tensor) -> lucid.Tensor:
-            u = model.tvm(x, t, s_, labels, w).sample
-            return (s_ - t).reshape(-1, 1, 1, 1) * u
-
-        h = 1e-2
-        with lucid.no_grad():
-            numeric = (displacement(s + h) - displacement(s - h)) / (2 * h)
-        scale = float(numeric.abs().max().item())
-        assert _gap(terminal.detach(), numeric) < 1e-2 * max(scale, 1.0)
-
-    def test_the_gradient_runs_through_the_jvp(self) -> None:
-        """Section 4: unlike MeanFlow, TVM back-propagates through ``∂_s F``.
-
-        The same draws with :attr:`TVMConfig.detach_jvp` set must give a
-        different gradient — if they agree, the JVP was detached all along.
-        """
-        grads = []
-        for detach in (False, True):
-            lucid.manual_seed(0)
-            model = TVMForImageGeneration(_tiny(detach_jvp=detach, target_ema_decay=0.0))
-            _wake(model.tvm)
-            lucid.manual_seed(1)
-            out = model(lucid.randn((2, 4, 8, 8)), lucid.tensor([1, 3]))
+        lucid.manual_seed(9)
+        model = TVM(_tiny(detach_jvp=detach_jvp)).to(device).train()
+        opt = lucid.optim.AdamW(model.parameters(), lr=1e-3)
+        images = lucid.randn((4, 3, 8, 8), device=device).clamp(-1.0, 1.0)
+        labels = lucid.tensor([0, 1, 2, 3], device=device)
+        before = model.net.final.proj.weight.detach().clone()
+        for _ in range(2):  # the second step sees a non-zero field
+            out = model(images, labels)
+            assert math.isfinite(float(out.loss.item()))
             out.loss.backward()
-            grads.append(model.tvm.blocks[0].attn.qkv.weight.grad)
-        assert grads[0] is not None and grads[1] is not None
-        assert _gap(grads[0], grads[1]) > 1e-8
-
-    def test_every_parameter_receives_a_finite_gradient(self) -> None:
-        """One step reaches the whole network, the guidance MLP included."""
-        model = TVMForImageGeneration(_tiny())
-        out = model(lucid.randn((2, 4, 8, 8)), lucid.tensor([1, 3]))
-        assert out.loss.ndim == 0 and bool(out.loss.isfinite().item())
-        out.loss.backward()
-        missing = [n for n, p in model.named_parameters() if p.grad is None]
-        assert not missing, missing
-        broken = [
-            n
-            for n, p in model.named_parameters()
-            if p.grad is not None and not bool(p.grad.isfinite().all().item())
-        ]
-        assert not broken, broken
-
-    def test_s_equals_t_leaves_only_flow_matching(self) -> None:
-        """The indicator in Eq. 15: at ``s = t`` the terminal term is zero."""
-        model = TVMForImageGeneration(_tiny(ratio_t_equals_s=1.0))
-        _wake(model.tvm)
-        out = model(lucid.randn((2, 4, 8, 8)), lucid.tensor([1, 3]))
-        assert float(out.terminal_loss.item()) == 0.0
-        assert float(out.flow_matching_loss.item()) > 0.0
+            opt.step()
+            opt.zero_grad()
+            model.update_ema()
+        assert _max(model.net.final.proj.weight.detach() - before) > 0.0
 
 
-class TestTarget:
-    def test_the_target_is_not_part_of_the_model(self) -> None:
-        """θ* is training state: not a parameter, not in the state dict."""
-        model = TVMForImageGeneration(_tiny())
-        before = sum(1 for _ in model.parameters())
-        keys = set(model.state_dict())
-        target = model.target_network
-        assert target is not model.tvm
-        assert sum(1 for _ in model.parameters()) == before
-        assert set(model.state_dict()) == keys
-        assert not any(p.requires_grad for p in target.parameters())
+# ── Algorithm 1's two averages ───────────────────────────────────────────
 
-    def test_the_target_starts_at_the_live_weights(self) -> None:
-        """Algorithm 1 initialises θ* ← θ."""
-        model = TVMForImageGeneration(_tiny())
-        live = dict(model.tvm.named_parameters())
-        for name, param in model.target_network.named_parameters():
-            assert _gap(param, live[name]) == 0.0, name
 
-    def test_update_ema_steps_both_averages(self) -> None:
-        """Algorithm 1: θ* and θ** each move by their own rate, per step."""
-        model = TVMForImageGeneration(_tiny(target_ema_decay=0.9, eval_ema_decay=0.5))
-        target = model.target_network.blocks[0].attn.qkv.weight.detach().clone()
-        evaluated = model.ema_network.blocks[0].attn.qkv.weight.detach().clone()
-        with lucid.no_grad():
-            model.tvm.blocks[0].attn.qkv.weight += 1.0
-        live = model.tvm.blocks[0].attn.qkv.weight.detach().clone()
+class TestEMA:
+    def test_averages_start_at_the_live_weights_and_stay_out_of_the_state_dict(self) -> None:
+        model = TVM(_tiny())
+        _wake(model.net)
+        live = dict(model.net.named_parameters())
+        for average in (model.target_network, model.ema_network):
+            for name, param in average.named_parameters():
+                assert not param.requires_grad
+                assert _max(param - live[name]) == 0.0
+        assert set(model.state_dict()) == {f"net.{k}" for k in model.net.state_dict()}
+        assert sum(1 for _ in model.parameters()) == sum(1 for _ in model.net.parameters())
+
+    def test_update_follows_algorithm_1(self) -> None:
+        model = TVM(_tiny(target_ema_decay=0.9, eval_ema_decay=0.99))
+        name = "blocks.0.attn.qkv.weight"
+        target0 = dict(model.target_network.named_parameters())[name].detach().clone()
+        eval0 = dict(model.ema_network.named_parameters())[name].detach().clone()
+        _wake(model.net)
+        live = dict(model.net.named_parameters())[name].detach()
         model.update_ema()
-        assert (
-            _gap(model.target_network.blocks[0].attn.qkv.weight, 0.9 * target + 0.1 * live)
-            < 1e-6
-        )
-        assert (
-            _gap(model.ema_network.blocks[0].attn.qkv.weight, 0.5 * evaluated + 0.5 * live)
-            < 1e-6
-        )
+        target1 = dict(model.target_network.named_parameters())[name]
+        eval1 = dict(model.ema_network.named_parameters())[name]
+        assert _max(target1 - (target0 * 0.9 + live * 0.1)) <= 1e-6
+        assert _max(eval1 - (eval0 * 0.99 + live * 0.01)) <= 1e-6
 
-    def test_update_ema_pairs_parameters_by_name(self) -> None:
-        """A re-assigned parameter must not shift the pairing.
+    def test_a_zero_target_rate_reads_the_live_network(self) -> None:
+        model = TVM(_tiny(target_ema_decay=0.0))
+        assert model.target_network is model.net
 
-        ``w += ...`` re-registers ``w`` at the end of its module, so the live
-        network and its average list parameters in different orders after
-        it; pairing them by position then mixes a weight with a bias.
-        """
-        model = TVMForImageGeneration(_tiny(target_ema_decay=0.5, eval_ema_decay=None))
-        _ = model.target_network
+
+# ── the sampler (Figure 3) ───────────────────────────────────────────────
+
+
+class TestSampler:
+    def test_steps_are_even_jumps_along_the_average_velocity(self) -> None:
+        lucid.manual_seed(10)
+        model = TVM(_tiny(eval_ema_decay=None))
+        net = _wake(model.net).eval()
+        noise = lucid.randn((2, 3, 8, 8))
+        labels = lucid.tensor([3, 7])
+        ones, half, zeros = (lucid.full((2,), v) for v in (1.0, 0.5, 0.0))
         with lucid.no_grad():
-            model.tvm.blocks[0].attn.qkv.weight += 2.0
-        model.update_ema()
-        live = dict(model.tvm.named_parameters())
-        for name, slow in model.target_network.named_parameters():
-            assert slow.shape == live[name].shape, name
-
-    def test_no_eval_average_is_kept_when_disabled(self) -> None:
-        """``eval_ema_decay=None`` keeps no θ** and says so when asked."""
-        model = TVMForImageGeneration(_tiny(eval_ema_decay=None))
-        with pytest.raises(ValueError):
-            _ = model.ema_network
-
-    def test_zero_decay_targets_the_live_network(self) -> None:
-        """Table 4b's γ = 0: no copy, the live weights under a stop-gradient."""
-        model = TVMForImageGeneration(_tiny(target_ema_decay=0.0))
-        assert model.target_network is model.tvm
+            one = model.generate(2, labels=labels, steps=1, noise=noise)
+            one_ref = noise - net(noise, ones, zeros, labels)
+            two = model.generate(2, labels=labels, steps=2, noise=noise)
+            mid = noise - 0.5 * net(noise, ones, half, labels)
+            two_ref = mid - 0.5 * net(mid, half, zeros, labels)
+        assert _max(one - one_ref) <= 1e-6
+        assert _max(two - two_ref) <= 1e-6
 
 
-class TestSampling:
-    def test_one_step_is_one_jump(self) -> None:
-        """Figure 3 at one step: ``x_0 = x_1 + (0 - 1) u``."""
-        config = _tiny()
+# ── agreement with Lucid's model-zoo implementation, where it exists ────
 
-        class _Ones(TVMModel):
-            def forward(
-                self,
-                x: lucid.Tensor,
-                t: lucid.Tensor,
-                s: lucid.Tensor,
-                labels: lucid.Tensor | None = None,
-                guidance_scale: lucid.Tensor | float | None = None,
-            ) -> DiffusionModelOutput:
-                return DiffusionModelOutput(sample=lucid.ones_like(x))
 
-        model = TVMForImageGeneration(config)
-        model.tvm = _Ones(config)
-        noise = lucid.randn((2, 4, 8, 8))
-        out = model.generate(2, noise=noise).samples
-        assert _gap(out, noise - 1.0) < 1e-6
+class TestZooParity:
+    """Runs only against a Lucid checkout that ships ``lucid.models.generative.tvm``
+    (development ``main`` after 8739862); the PyPI release skips it."""
 
-    def test_steps_walk_an_even_grid_from_one_to_zero(self) -> None:
-        """``linspace(1, 0, n + 1)`` — each step jumps between neighbours."""
-        config = _tiny()
-        seen: list[tuple[float, float]] = []
+    @pytest.fixture
+    def zoo(self):  # type: ignore[no-untyped-def]
+        return pytest.importorskip("lucid.models.generative.tvm")
 
-        class _Recorder(TVMModel):
-            def forward(
-                self,
-                x: lucid.Tensor,
-                t: lucid.Tensor,
-                s: lucid.Tensor,
-                labels: lucid.Tensor | None = None,
-                guidance_scale: lucid.Tensor | float | None = None,
-            ) -> DiffusionModelOutput:
-                seen.append((float(t[0].item()), float(s[0].item())))
-                return DiffusionModelOutput(sample=lucid.zeros_like(x))
+    @staticmethod
+    def _zoo_config(zoo, **overrides: object):  # type: ignore[no-untyped-def]
+        fields = dict(_tiny(**overrides).__dict__)
+        return zoo.TVMConfig(**fields, latent_mean=(0.0,) * 3, latent_std=(1.0,) * 3)
 
-        model = TVMForImageGeneration(config)
-        model.tvm = _Recorder(config)
-        model.generate(1, steps=4)
-        expected = [(1.0, 0.75), (0.75, 0.5), (0.5, 0.25), (0.25, 0.0)]
-        assert all(
-            math.isclose(a, c, abs_tol=1e-6) and math.isclose(b, d, abs_tol=1e-6)
-            for (a, b), (c, d) in zip(seen, expected, strict=True)
-        ), seen
-
-    def test_to_vae_latent_inverts_the_whitening(self) -> None:
-        """``ℓ = z σ + μ`` per channel, and ``from_vae_latent`` undoes it."""
-        model = TVMForImageGeneration(_tiny())
-        raw = model.to_vae_latent(lucid.zeros((1, 4, 8, 8)))
-        mean = lucid.tensor(list(model.config.latent_mean)).reshape(1, -1, 1, 1)
-        assert _gap(raw, mean + lucid.zeros((1, 4, 8, 8))) < 1e-6
-        latent = lucid.randn((2, 4, 8, 8)) * 5.0
-        assert _gap(model.to_vae_latent(model.from_vae_latent(latent)), latent) < 1e-4
-
-    def test_use_ema_samples_from_the_evaluation_average(self) -> None:
-        """``generate(use_ema=True)`` reads θ**, not the live weights."""
-        model = TVMForImageGeneration(_tiny(eval_ema_decay=0.5)).eval()
-        _wake(model.tvm)
-        _ = model.ema_network  # θ** ← θ
+    def test_the_networks_agree(self, zoo) -> None:  # type: ignore[no-untyped-def]
+        lucid.manual_seed(11)
+        mine = _wake(TVMNet(_tiny())).eval()
+        theirs = zoo.TVMModel(self._zoo_config(zoo)).eval()
+        theirs.load_state_dict(mine.state_dict())
+        x, t, s, labels, w = _inputs("cpu")
         with lucid.no_grad():
-            model.tvm.final.proj.weight += 1.0
-        noise = lucid.randn((1, 4, 8, 8))
-        live = model.generate(1, noise=noise).samples
-        averaged = model.generate(1, noise=noise, use_ema=True).samples
-        assert _gap(live, averaged) > 1e-6
+            ref = theirs(x, t, s, labels, w).sample
+            gap = mine(x, t, s, labels, w) - ref
+        assert _max(gap) <= 1e-5 * max(_max(ref), 1.0)
+
+    def test_the_losses_and_gradients_agree(self, zoo) -> None:  # type: ignore[no-untyped-def]
+        lucid.manual_seed(12)
+        mine = TVM(_tiny(class_dropout=0.3))
+        _wake(mine.net)
+        theirs = zoo.TVMForImageGeneration(self._zoo_config(zoo, class_dropout=0.3))
+        theirs.tvm.load_state_dict(mine.net.state_dict())
+        images = lucid.randn((4, 3, 8, 8)).clamp(-1.0, 1.0)
+        labels = lucid.tensor([0, 1, 2, 3])
+
+        lucid.manual_seed(13)
+        a = mine(images, labels)
+        a.loss.backward()
+        lucid.manual_seed(13)
+        b = theirs(images, labels)
+        b.loss.backward()
+        assert math.isclose(float(a.loss.item()), float(b.loss.item()), rel_tol=1e-4)
+        theirs_grads = dict(theirs.tvm.named_parameters())
+        for name, param in mine.net.named_parameters():
+            other = theirs_grads[name].grad
+            assert other is not None and param.grad is not None
+            assert _max(param.grad - other) <= 1e-3 * max(_max(other), 1e-6), name

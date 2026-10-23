@@ -14,8 +14,16 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import numpy as np
+from tqdm import tqdm
 
-URL = "https://www.cs.toronto.edu/~kriz/cifar-10-python.tar.gz"
+# The official archive and a byte-identical Hugging Face mirror, tried in order.
+# The md5 below is the official one, so any mirror is safe to try: a file that
+# does not match it is discarded.  The mirror comes first because the Toronto
+# server is often throttled to ~100 KiB/s (25 minutes for 170 MB).
+MIRRORS = (
+    "https://huggingface.co/datasets/MIT-OL-AI-D/cifar-10-python/resolve/main/cifar-10-python.tar.gz",
+    "https://www.cs.toronto.edu/~kriz/cifar-10-python.tar.gz",
+)
 MD5 = "c58f30108f718f92721af3b95e74349a"
 CLASSES = (
     "airplane", "automobile", "bird", "cat", "deer",
@@ -31,6 +39,18 @@ def _md5(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _download(url: str, target: Path) -> None:
+    """Stream ``url`` to ``target`` with a progress bar (via ``target.part``)."""
+    partial = target.with_name(target.name + ".part")
+    with urllib.request.urlopen(url, timeout=60) as response, open(partial, "wb") as out:
+        total = int(response.headers.get("Content-Length") or 0) or None
+        with tqdm(total=total, unit="B", unit_scale=True, desc=target.name) as bar:
+            for chunk in iter(lambda: response.read(1 << 20), b""):
+                out.write(chunk)
+                bar.update(len(chunk))
+    partial.replace(target)
+
+
 def ensure_cifar10(root: Path) -> Path:
     """The extracted ``cifar-10-batches-py`` folder, downloading it if absent."""
     folder = root / "cifar-10-batches-py"
@@ -38,11 +58,22 @@ def ensure_cifar10(root: Path) -> Path:
         return folder
     root.mkdir(parents=True, exist_ok=True)
     archive = root / "cifar-10-python.tar.gz"
+    if archive.exists() and _md5(archive) != MD5:
+        print(f"{archive} is incomplete or corrupt (md5 mismatch); downloading again")
+        archive.unlink()
+    for url in MIRRORS:
+        if archive.exists():
+            break
+        try:
+            _download(url, archive)
+        except OSError as error:
+            print(f"download from {url} failed: {error}")
+            continue
+        if _md5(archive) != MD5:
+            print(f"{url} served a file with the wrong md5; trying the next mirror")
+            archive.unlink()
     if not archive.exists():
-        print(f"downloading CIFAR-10 to {archive} ...")
-        urllib.request.urlretrieve(URL, archive)
-    if _md5(archive) != MD5:
-        raise RuntimeError(f"{archive} failed its md5 check; delete it and retry")
+        raise RuntimeError(f"could not download CIFAR-10 from any of {MIRRORS}")
     with tarfile.open(archive) as tar:
         tar.extractall(root, filter="data")
     return folder

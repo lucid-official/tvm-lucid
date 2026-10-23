@@ -24,7 +24,6 @@ from pathlib import Path
 from typing import Any
 
 import lucid
-import lucid.models as M
 import numpy as np
 from tqdm import tqdm
 
@@ -33,6 +32,7 @@ from tvm_lucid.data import to_unit
 from tvm_lucid.inception import InceptionV3, reference_stats
 from tvm_lucid.model import DEVICE
 from tvm_lucid.stats import GaussianAccumulator, frechet_distance, inception_score
+from tvm_lucid.tvm import TVM
 
 
 def save_grid(samples: np.ndarray, path: Path, rows: int = 10) -> None:
@@ -83,7 +83,7 @@ class Evaluator:
 
     # ── grids and flow-map consistency ───────────────────────────────────
 
-    def grids(self, model: M.TVMForImageGeneration, tag: str) -> dict[str, Any]:
+    def grids(self, model: TVM, tag: str) -> dict[str, Any]:
         use_ema = model.config.eval_ema_decay is not None
         model.eval()
         outputs: dict[int, np.ndarray] = {}
@@ -91,7 +91,7 @@ class Evaluator:
             out = model.generate(
                 100, labels=self.grid_labels, steps=nfe, noise=self.grid_noise, use_ema=use_ema
             )
-            outputs[nfe] = out.samples.to("cpu").numpy()
+            outputs[nfe] = out.to("cpu").numpy()
             save_grid(outputs[nfe], self.samples_dir / f"{tag}_nfe{nfe}.png")
         model.train()
         finest = max(outputs)
@@ -105,8 +105,8 @@ class Evaluator:
 
     # ── per-time velocity probe ──────────────────────────────────────────
 
-    def probe(self, model: M.TVMForImageGeneration) -> dict[str, Any]:
-        networks = {"live": model.tvm}
+    def probe(self, model: TVM) -> dict[str, Any]:
+        networks = {"live": model.net}
         if model.config.eval_ema_decay is not None:
             networks["ema"] = model.ema_network
         n = self.probe_x.shape[0]
@@ -118,7 +118,7 @@ class Evaluator:
                 for s_value in self.probe_s:
                     s = lucid.full((n,), s_value, device=DEVICE)
                     x_s = (1.0 - s_value) * self.probe_x + s_value * self.probe_eps
-                    u = net(x_s, s, s, None, 1.0).sample
+                    u = net(x_s, s, s, None, 1.0)
                     v = self.probe_eps - self.probe_x
                     errors.append(float(((u - v) ** 2).mean().item()))
                 if name == "live":
@@ -138,7 +138,7 @@ class Evaluator:
             )
         return self._inception, self._reference
 
-    def fid(self, model: M.TVMForImageGeneration) -> dict[str, Any]:
+    def fid(self, model: TVM) -> dict[str, Any]:
         inception, (mu_ref, sigma_ref) = self._ensure_inception()
         use_ema = model.config.eval_ema_decay is not None
         total, batch = self.cfg.fid_samples, self.cfg.sample_batch
@@ -158,7 +158,7 @@ class Evaluator:
                     labels=lucid.tensor(labels, device=DEVICE),
                     steps=nfe,
                     use_ema=use_ema,
-                ).samples
+                )
                 features, p = inception(samples)
                 acc.update(features)
                 probs.append(p)

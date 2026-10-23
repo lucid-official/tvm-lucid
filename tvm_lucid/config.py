@@ -2,9 +2,9 @@
 
 Three typed sections drive the code (``data``, ``train``, ``eval``); the
 ``model`` section is passed through untouched as overrides of
-:class:`lucid.models.generative.tvm.TVMConfig`, so any field that config
-knows — the time sampler, the EMA rates, the scaled parameterisation — can
-be set from the file without this module listing it.
+:class:`tvm_lucid.tvm.TVMConfig`, so any field that config knows — the time
+sampler, the EMA rates, the scaled parameterisation — can be set from the
+file without this module listing it.
 """
 
 import dataclasses
@@ -84,8 +84,7 @@ def _typed(cls: type, values: dict[str, Any]) -> Any:
     if unknown:
         raise KeyError(f"[{cls.__name__}] has no field(s) {unknown}")
     coerced = {
-        key: tuple(value) if isinstance(value, list) else value
-        for key, value in values.items()
+        key: tuple(value) if isinstance(value, list) else value for key, value in values.items()
     }
     return cls(**coerced)
 
@@ -122,7 +121,9 @@ def from_dict(raw: dict[str, Any]) -> ExperimentConfig:
     )
 
 
-def load(path: Path | None, overrides: list[str] = (), base: dict[str, Any] | None = None) -> ExperimentConfig:
+def load(
+    path: Path | None, overrides: list[str] = (), base: dict[str, Any] | None = None
+) -> ExperimentConfig:
     """Read ``path`` (or start from ``base``), apply overrides, validate."""
     raw: dict[str, Any] = dict(base or {})
     if path is not None:

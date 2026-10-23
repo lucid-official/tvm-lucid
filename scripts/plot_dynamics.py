@@ -33,7 +33,7 @@ def num(value: Any) -> float:
     """JSON numbers, and the "nan"/"inf" strings the logger writes for them."""
     try:
         return float(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return math.nan
 
 
@@ -63,7 +63,11 @@ def plot_steps(rows: list[dict[str, Any]], out: Path) -> None:
     x = np.array([r["global_step"] for r in steps])
 
     fig, ax = plt.subplots(figsize=(8, 4.5))
-    for key, label in (("loss", "total"), ("terminal", "terminal velocity"), ("fm", "flow matching")):
+    for key, label in (
+        ("loss", "total"),
+        ("terminal", "terminal velocity"),
+        ("fm", "flow matching"),
+    ):
         y = np.array([num(r.get(key)) for r in steps])
         ax.plot(x, y, alpha=0.2)
         ax.plot(x, smooth(y), label=label)

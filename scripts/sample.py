@@ -39,7 +39,7 @@ def main() -> None:
     state = load_checkpoint(args.run / "ckpt" / f"{args.ckpt}.lucid")
     model.load_state_dict(state["model"])
     if "ema" in state and not args.live:
-        model.tvm.load_state_dict(state["ema"])
+        model.net.load_state_dict(state["ema"])
         which = "ema"
     else:
         which = "live"
@@ -52,9 +52,11 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     for w in tqdm(weights, desc="guidance"):
         for nfe in tqdm(args.nfe, desc=f"w={w}", leave=False):
-            samples = model.generate(100, labels=labels, steps=nfe, guidance_scale=w, noise=noise)
+            samples = model.generate(
+                100, labels=labels, steps=nfe, guidance_scale=w, noise=noise, use_ema=False
+            )
             name = f"{args.ckpt}_{which}_w{w:g}_nfe{nfe}.png"
-            save_grid(samples.samples.to("cpu").numpy(), out_dir / name)
+            save_grid(samples.to("cpu").numpy(), out_dir / name)
     print("wrote grids to", out_dir)
 
 

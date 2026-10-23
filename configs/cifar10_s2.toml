@@ -7,7 +7,7 @@ seed = 0
 root = "~/datasets"        # CIFAR-10 is downloaded here on first use
 flip = true                # horizontal flips; the paper's ImageNet runs use none
 
-[model]                    # any lucid.models.generative.tvm.TVMConfig field
+[model]                    # any tvm_lucid.tvm.TVMConfig field
 hidden_size = 384
 depth = 12
 num_heads = 6

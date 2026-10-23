@@ -18,8 +18,8 @@ import math
 import os
 import platform
 import socket
-import subprocess
 import time
+from importlib import metadata
 from pathlib import Path
 from typing import Any
 
@@ -35,14 +35,11 @@ def new_run_dir(root: Path, name: str) -> Path:
     return path
 
 
-def _lucid_commit() -> str | None:
-    source = Path(lucid.__file__).resolve().parent.parent
+def _lucid_distribution() -> str | None:
+    """The installed ``lucid-dl`` release (None for an unpackaged checkout)."""
     try:
-        return subprocess.run(
-            ["git", "-C", str(source), "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()  # fmt: skip
-    except (OSError, subprocess.CalledProcessError):
+        return metadata.version("lucid-dl")
+    except metadata.PackageNotFoundError:
         return None
 
 
@@ -53,7 +50,8 @@ def environment() -> dict[str, Any]:
         "platform": platform.platform(),
         "python": platform.python_version(),
         "lucid_version": lucid.__version__,
-        "lucid_commit": _lucid_commit(),
+        "lucid_dl": _lucid_distribution(),
+        "lucid_path": str(Path(lucid.__file__).resolve().parent),
         "device": metal.get_device_name(),
         "started": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "pid": os.getpid(),
@@ -93,12 +91,14 @@ class JsonlLog:
 def save_checkpoint(path: Path, state: dict[str, Any]) -> None:
     """Write atomically: a crash mid-write leaves the previous file intact."""
     tmp = path.with_name(path.name + ".tmp")
-    lucid.save(state, tmp)
+    lucid.save(state, str(tmp))  # str: lucid.save treats anything else as a file object
     tmp.replace(path)
 
 
 def load_checkpoint(path: Path) -> dict[str, Any]:
-    state = lucid.load(path, map_location="metal")
+    # lucid.load is lucid.serialization.load, which takes map_location (3.15.5's
+    # top-level stub leaves it out).
+    state = lucid.load(str(path), map_location="metal")
     if not isinstance(state, dict):
         raise TypeError(f"{path} is not a tvm-lucid checkpoint")
     return state
