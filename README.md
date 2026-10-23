@@ -24,7 +24,7 @@ tvm_lucid/
 scripts/
   plot_dynamics.py  run 의 JSONL → plots/*.png
   sample.py         체크포인트 → NFE × guidance 그리드
-tests/              Lucid 없이 도는 단위 테스트 (stats, data, config)
+tests/              stats·data·config (Lucid 불필요) + test_tvm_method.py (방법 자체 검증, Lucid 필요)
 ```
 
 ## 환경 (Mac Studio)
@@ -111,3 +111,9 @@ runs/<name>-<timestamp>/
 ```bash
 $LUCID_PY -m pytest -q tests      # pytest 가 없으면: uv pip install --python $LUCID_PY pytest scipy
 ```
+
+`test_tvm_method.py` 는 방법 자체를 검증합니다 — 종단 속도가 변위의 s-미분(유한차분과 비교)인지,
+기울기가 JVP 를 통과하는지, modulation norm 이 modulation 크기에 불변인지, scaled
+parameterisation 이 정확히 w 배인지, 두 EMA 가 Algorithm 1 을 따르는지, 샘플러가 Figure 3 인지.
+Lucid 라이브러리의 테스트 스위트는 TVM 을 zoo 공통 계약(학습 스텝·출력 형식·생성·동기화 횟수)으로만
+다루므로, 이런 방법 특화 검증은 이 저장소에 둡니다. Lucid 를 업데이트한 뒤 실험 전에 한 번 돌리세요.
