@@ -309,6 +309,19 @@ class TestSampler:
         assert _max(one - one_ref) <= 1e-6
         assert _max(two - two_ref) <= 1e-6
 
+    def test_the_trajectory_runs_from_the_noise_to_the_sample(self) -> None:
+        lucid.manual_seed(14)
+        model = TVM(_tiny(eval_ema_decay=None))
+        _wake(model.net).eval()
+        noise = lucid.randn((2, 3, 8, 8))
+        labels = lucid.tensor([3, 7])
+        with lucid.no_grad():
+            path = model.trajectory(2, labels=labels, steps=4, noise=noise)
+            final = model.generate(2, labels=labels, steps=4, noise=noise)
+        assert len(path) == 5
+        assert _max(path[0] - noise) == 0.0
+        assert _max(path[-1] - final) == 0.0
+
 
 # ── agreement with Lucid's model-zoo implementation, where it exists ────
 

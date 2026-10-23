@@ -251,6 +251,37 @@ class TVM(nn.Module):
 
     # ── sampling ─────────────────────────────────────────────────────────
 
+    def trajectory(
+        self,
+        n: int,
+        *,
+        labels: Tensor | None = None,
+        steps: int = 1,
+        guidance_scale: float | None = None,
+        noise: Tensor | None = None,
+        use_ema: bool = True,
+    ) -> list[Tensor]:
+        r"""Every state the sampler passes through: :math:`x_t` at
+        :math:`t = 1, 1 - 1/\mathrm{steps}, \dots, 0` — ``steps + 1`` tensors,
+        noise first.  See :meth:`generate`.
+        """
+        if steps < 1:
+            raise ValueError(f"steps must be positive, got {steps}")
+        c = self.config
+        device = next(iter(self.net.parameters())).device.type
+        if noise is None:
+            noise = lucid.randn((n, c.in_channels, c.sample_size, c.sample_size), device=device)
+        network = self.ema_network if use_ema and c.eval_ema_decay is not None else self.net
+        states = [noise]
+        with lucid.no_grad():
+            for i in range(steps):
+                t_value, s_value = 1.0 - i / steps, 1.0 - (i + 1) / steps
+                t = lucid.full((n,), t_value, device=device)
+                s = lucid.full((n,), s_value, device=device)
+                x = states[-1]
+                states.append(x + (s_value - t_value) * network(x, t, s, labels, guidance_scale))
+        return states
+
     def generate(
         self,
         n: int,
@@ -266,18 +297,11 @@ class TVM(nn.Module):
         ``[0, 1]`` is split evenly; the same network serves every step count.
         ``use_ema`` samples θ** when one is kept (what the paper evaluates).
         """
-        if steps < 1:
-            raise ValueError(f"steps must be positive, got {steps}")
-        c = self.config
-        device = next(iter(self.net.parameters())).device.type
-        if noise is None:
-            noise = lucid.randn((n, c.in_channels, c.sample_size, c.sample_size), device=device)
-        network = self.ema_network if use_ema and c.eval_ema_decay is not None else self.net
-        x = noise
-        with lucid.no_grad():
-            for i in range(steps):
-                t_value, s_value = 1.0 - i / steps, 1.0 - (i + 1) / steps
-                t = lucid.full((n,), t_value, device=device)
-                s = lucid.full((n,), s_value, device=device)
-                x = x + (s_value - t_value) * network(x, t, s, labels, guidance_scale)
-        return x
+        return self.trajectory(
+            n,
+            labels=labels,
+            steps=steps,
+            guidance_scale=guidance_scale,
+            noise=noise,
+            use_ema=use_ema,
+        )[-1]

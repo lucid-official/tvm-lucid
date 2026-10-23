@@ -29,7 +29,8 @@ from lucid.nn.utils import clip_grad_norm_
 from tqdm import tqdm
 
 from tvm_lucid import config as config_mod
-from tvm_lucid.data import EpochLoader, load_split
+from tvm_lucid.dashboard import Dashboard
+from tvm_lucid.data import EpochLoader, load_split, to_unit
 from tvm_lucid.dynamics import activation_probe, ema_drift, grouped_norms, snapshot, update_ratio
 from tvm_lucid.evaluate import Evaluator
 from tvm_lucid.model import DEVICE, build, count_parameters
@@ -199,6 +200,30 @@ class Trainer:
              "params": count_parameters(self.model), "hours": tc.hours, **self.notes}
         )  # fmt: skip
 
+        dashboard = self._dashboard()
+
+        def redraw(note: str = "") -> None:
+            if dashboard is None:
+                return
+            try:
+                dashboard.update(
+                    self.model, self.epoch + self.step_in_epoch / per_epoch, self.global_step, note
+                )
+            except Exception as error:  # a plot must never stop a run
+                logs["events"].write(
+                    {
+                        "event": "dashboard_error",
+                        "global_step": self.global_step,
+                        "error": repr(error),
+                    }
+                )
+
+        redraw("starting")
+        losses = ("loss", "terminal", "fm")
+        running = dict.fromkeys(losses, 0.0)  # since the last metrics row
+        epoch_sum = dict.fromkeys(losses, 0.0)  # since the epoch began (or the run resumed)
+        running_n = epoch_n = 0
+
         stop_reason = None
         epochs = tqdm(
             total=tc.epochs, initial=self.epoch, desc="epochs", position=0, dynamic_ncols=True
@@ -235,6 +260,11 @@ class Trainer:
                         continue
                     self.global_step += 1
                     window_steps += 1
+                    for key in losses:
+                        running[key] += record[key]
+                        epoch_sum[key] += record[key]
+                    running_n += 1
+                    epoch_n += 1
 
                     if self.global_step % tc.log_every == 0 or dynamics:
                         elapsed = time.perf_counter() - window
@@ -246,12 +276,16 @@ class Trainer:
                             "global_step": self.global_step,
                             "epoch": self.epoch + self.step_in_epoch / per_epoch,
                             **record,
+                            # The running loss: every step since the last row, not just this one.
+                            **{f"{key}_mean": running[key] / running_n for key in losses},
                             "lr": tc.lr,
                             "img_per_s": rate,
                             "mem_gib": metal.memory_allocated() / GiB,
                             "peak_gib": metal.max_memory_allocated() / GiB,
                         }
                         logs["metrics"].write(row)
+                        running = dict.fromkeys(losses, 0.0)
+                        running_n = 0
                         if dyn is not None:
                             logs["metrics"].write(
                                 {"kind": "dynamics", "global_step": self.global_step, **dyn}
@@ -263,6 +297,9 @@ class Trainer:
                             ips=f"{row['img_per_s']:.0f}",
                             mem=f"{row['peak_gib']:.1f}G",
                         )
+                    every = self.cfg.eval.dashboard_every_steps
+                    if every and self.global_step % every == 0:
+                        redraw()
                     if time.time() >= deadline:
                         stop_reason = f"time budget of {tc.hours} h reached"
                         break
@@ -277,10 +314,15 @@ class Trainer:
                 self.checkpoint("last.lucid")
                 if tc.keep_every_epochs and (finished + 1) % tc.keep_every_epochs == 0:
                     self.checkpoint(f"epoch_{finished:04d}.lucid")
-                row = {"epoch": finished, "global_step": self.global_step}
+                row: dict[str, Any] = {"epoch": finished, "global_step": self.global_step}
+                if epoch_n:
+                    row.update({f"train_{key}": epoch_sum[key] / epoch_n for key in losses})
+                epoch_sum = dict.fromkeys(losses, 0.0)
+                epoch_n = 0
                 if evaluator is not None:
                     row.update(self.evaluate(evaluator, finished, logs["events"]))
                 logs["epoch"].write(row)
+                redraw()
                 epochs.update(1)
                 shown = {k: f"{v:.2f}" for k, v in row.items() if k.startswith("fid_nfe")}
                 epochs.set_postfix(step=self.global_step, **shown)
@@ -297,6 +339,19 @@ class Trainer:
             for log in logs.values():
                 log.close()
             tqdm.write(f"stopped: {stop_reason or 'all epochs done'} — {self.run_dir}")
+
+    def _dashboard(self) -> Dashboard | None:
+        ec = self.cfg.eval
+        if not ec.dashboard:
+            return None
+        return Dashboard(
+            self.run_dir,
+            nfe=ec.dashboard_nfe,
+            seed=ec.grid_noise_seed + 1,
+            steps_per_epoch=self.loader.steps_per_epoch // self.cfg.train.grad_accum,
+            fid_every=ec.fid_every_epochs,
+            data_std=float(to_unit(self.train_x[:10_000]).std()),
+        )
 
     def evaluate(self, evaluator: Evaluator, epoch: int, events: JsonlLog) -> dict[str, Any]:
         ec = self.cfg.eval

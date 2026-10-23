@@ -62,3 +62,6 @@ fid_samples = 5000
 fid_nfe = [1, 2]
 fid_batch = 250
 sample_batch = 500
+dashboard = true           # runs/<run>/dashboard.png, rewritten in place every epoch
+dashboard_nfe = 8          # jumps in its noise -> data strip
+dashboard_every_steps = 0  # also redraw every N steps (0: epochs only)

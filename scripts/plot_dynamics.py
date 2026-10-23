@@ -7,8 +7,8 @@ it only reads the JSONL logs.
 """
 
 import argparse
-import json
 import math
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -18,35 +18,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # run from anywhere
 
-def read_jsonl(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    rows = []
-    for line in path.read_text().splitlines():
-        if line.strip():
-            rows.append(json.loads(line))
-    return rows
-
-
-def num(value: Any) -> float:
-    """JSON numbers, and the "nan"/"inf" strings the logger writes for them."""
-    try:
-        return float(value)
-    except TypeError, ValueError:
-        return math.nan
-
-
-def smooth(values: np.ndarray, beta: float = 0.9) -> np.ndarray:
-    """Bias-corrected exponential moving average, NaN-tolerant."""
-    out = np.empty_like(values)
-    avg, weight = 0.0, 0.0
-    for i, v in enumerate(values):
-        if math.isfinite(v):
-            avg = beta * avg + (1 - beta) * v
-            weight = beta * weight + (1 - beta)
-        out[i] = avg / weight if weight else math.nan
-    return out
+from tvm_lucid.logs import num, read_jsonl, smooth  # noqa: E402
 
 
 def save(fig: plt.Figure, path: Path) -> None:

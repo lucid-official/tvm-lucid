@@ -171,11 +171,28 @@ but its guarantees were measured at its own batch, data and model.
 Everything in the table is one line of [`configs/cifar10_s2.toml`](configs/cifar10_s2.toml), where each value names
 the released field it copies. Every `TVMConfig` field can be set under `[model]`.
 
+### Live dashboard
+
+`runs/<run>/dashboard.png` is redrawn at the start of the run and after every epoch (and every
+`eval.dashboard_every_steps` steps, if set). Each redraw replaces the file in one step, so a viewer never reads half
+an image: Preview normally picks up each new version, and `dashboard.html` shows the same image in any browser,
+reloading it every 30 seconds.
+
+| | left | right |
+|---|---|---|
+| top | **loss**: total, terminal and flow matching, as running loss per iteration (lines) and epoch means (markers), step and epoch axes | **samples**: FID by NFE, and the held-out flow-matching error of $\theta^{**}$ |
+| middle | **optimisation**: global gradient norm and update ratio $\lVert\Delta\theta\rVert/\lVert\theta\rVert$ | **consistency**: flow-map gap (K-step vs N-step) and sample std against the data's |
+| bottom | the denoising path, one class per row, from the same noise $x_1$ to $x_0$ in 8 jumps of $\theta^{**}$ (both columns) | |
+
+The full set of dynamics plots (per-block norms, EMA lag, activation RMS, error by time) is
+`scripts/plot_dynamics.py`.
+
 ### What gets measured
 
 | measurement | when | what it tells you |
 |---|---|---|
-| `loss`, `terminal`, `fm` | every step | Eq. 15 and its two terms; `terminal` is 0 on $s = t$ samples |
+| `loss`, `terminal`, `fm` (and `*_mean`) | every step | Eq. 15 and its two terms; `*_mean` averages every step since the last row |
+| `train_loss`, `train_terminal`, `train_fm` | every epoch | the same, averaged over the epoch |
 | gradient / parameter norms per block | `dynamics_every` | a block collapsing or exploding before the loss shows it |
 | update ratio $\lVert\Delta\theta\rVert/\lVert\theta\rVert$ | `dynamics_every` | the step size Adam actually applies |
 | EMA drift of $\theta^*$, $\theta^{**}$ | `dynamics_every` | how far the target and evaluation networks lag |
@@ -187,7 +204,8 @@ the released field it copies. Every `TVMConfig` field can be set under `[model]`
 
 ```
 runs/<name>-<timestamp>/
-  config.json   env.json                 resolved config; host, lucid-dl version, start time
+  dashboard.png dashboard.html           the live dashboard, rewritten in place
+  config.json   env.json                 resolved config; host, Lucid version and commit, start time
   metrics.jsonl                          kind=step and kind=dynamics rows
   epoch.jsonl   events.jsonl             per-epoch evaluation; start / stop / resume / skips / best FID
   samples/      ckpt/     plots/         grids; last, best_fid, epoch_XXXX; plot_dynamics.py output
