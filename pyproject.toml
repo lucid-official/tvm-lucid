@@ -18,10 +18,11 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
-# Pinned: the forward-mode JVP in tvm_lucid/tvm/layers.py exists because of
-# how this release's lucid.func.jvp behaves; re-check before moving the pin.
+# 3.15.5 or a later Lucid, including a checkout of `main` (README, Install).
+# The forward-mode JVP in tvm_lucid/tvm/layers.py does not rely on
+# lucid.func.jvp, whose 3.15.5 form returns its tangent detached.
 dependencies = [
-    "lucid-dl==3.15.5",
+    "lucid-dl>=3.15.5",
     # lucid-dl 3.15.5 was built against mlx 0.32.3; 0.32.4 changed the ABI
     # (mlx::core::array::set_data), and the engine fails to load against it.
     "mlx==0.32.3",

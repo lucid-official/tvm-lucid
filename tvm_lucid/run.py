@@ -18,6 +18,7 @@ import math
 import os
 import platform
 import socket
+import subprocess
 import time
 from importlib import metadata
 from pathlib import Path
@@ -43,6 +44,24 @@ def _lucid_distribution() -> str | None:
         return None
 
 
+def _lucid_checkout(source: Path) -> dict[str, Any] | None:
+    """Commit and local-change flag when Lucid runs from a git checkout.
+
+    A checkout's version string does not move between releases, so the commit
+    is what identifies the code a run used.
+    """
+
+    def git(*args: str) -> str:
+        return subprocess.run(
+            ["git", "-C", str(source), *args], capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+    try:
+        return {"commit": git("rev-parse", "HEAD"), "dirty": bool(git("status", "--porcelain"))}
+    except OSError, subprocess.CalledProcessError:
+        return None
+
+
 def environment() -> dict[str, Any]:
     """What a reader needs to reproduce or compare the run."""
     return {
@@ -52,6 +71,7 @@ def environment() -> dict[str, Any]:
         "lucid_version": lucid.__version__,
         "lucid_dl": _lucid_distribution(),
         "lucid_path": str(Path(lucid.__file__).resolve().parent),
+        "lucid_checkout": _lucid_checkout(Path(lucid.__file__).resolve().parent.parent),
         "device": metal.get_device_name(),
         "started": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "pid": os.getpid(),

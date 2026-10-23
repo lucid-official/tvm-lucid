@@ -185,15 +185,36 @@ runs/<name>-<timestamp>/
 
 ## Install
 
-You need an Apple Silicon Mac on macOS 26 or later, and Python 3.14. Lucid comes from PyPI, and nothing else is
-needed.
+You need an Apple Silicon Mac on macOS 26 or later, and Python 3.14. The code uses Lucid's public API only, so it
+runs on either Lucid below.
+
+**Lucid's `main` (recommended until the next release).** The PyPI release 3.15.5 handles Metal views in a Python
+layer that `main` replaced with C++ strided views, and the same training step was about 4× slower on it. With a
+built Lucid checkout, use that checkout's interpreter and run from this directory, with nothing installed:
 
 ```bash
 git clone https://github.com/lucid-official/tvm-lucid && cd tvm-lucid
+LUCID_PY=~/path/to/lucid/.venv/bin/python             # the checkout's own venv
+uv pip install --python $LUCID_PY tqdm pillow matplotlib
+$LUCID_PY -c "import lucid; print(lucid.__file__)"   # must point into the checkout
+$LUCID_PY -m pytest -q                               # also runs the parity tests against Lucid's zoo TVM
+```
+
+Every command below then starts with `$LUCID_PY` in place of `python`. Each run records the checkout's commit, and
+whether it had local changes, in `env.json`. Do not rebuild or sync the checkout while a run is going: modules
+that are imported later in the run would come from the new code.
+
+**PyPI `lucid-dl` 3.15.5.**
+
+```bash
 uv venv --python 3.14 .venv && source .venv/bin/activate
 uv pip install -e ".[test]"
-python -m pytest -q                      # method checks on CPU and Metal
+python -m pytest -q
 ```
+
+3.15.5 declares `mlx>=0.31` with no upper bound, but it is linked against mlx 0.32.3. mlx 0.32.4 changed
+`mlx::core::array::set_data`, so on a fresh install Lucid fails to import. `pyproject.toml` therefore pins
+`mlx==0.32.3`.
 
 ## Quick start
 
