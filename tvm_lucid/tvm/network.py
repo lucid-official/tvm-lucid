@@ -17,6 +17,7 @@ development branch, so a state dict moves between the two unchanged.
 """
 
 import lucid
+import lucid.autograd
 import lucid.nn as nn
 from lucid import Tensor
 
@@ -126,6 +127,19 @@ class TVMNet(nn.Module):
         x = x.reshape(-1, g, g, p, p, c).permute(0, 5, 1, 3, 2, 4)
         return x.reshape(-1, c, g * p, g * p)
 
+    def _checkpointed(self, segment, *inputs: Tensor):  # type: ignore[no-untyped-def]
+        """``segment(*inputs)``, recomputed in backward under ``gradient_checkpointing``.
+
+        Only while autograd records: under ``no_grad`` (target reads, sampling)
+        nothing is kept anyway.  Reentrant mode is enough — the token stream
+        always requires grad here, so the segment is always recomputed.
+        """
+        if self.config.gradient_checkpointing and lucid.is_grad_enabled():
+            return lucid.autograd.checkpoint(
+                segment, *inputs, use_reentrant=True, preserve_rng_state=False
+            )
+        return segment(*inputs)
+
     def _scale(self, out: Tensor, guidance: Tensor) -> Tensor:
         if self.config.scaled_parameterization:
             return out * guidance.reshape(-1, 1, 1, 1)
@@ -152,7 +166,7 @@ class TVMNet(nn.Module):
         act = silu(cond)
         tokens = self._tokens(x)
         for block in self.blocks:
-            tokens = block(tokens, act)
+            tokens = self._checkpointed(block, tokens, act)
         return self._scale(self._unpatchify(self.final(tokens, act)), guidance)
 
     def jvp_s(
@@ -181,7 +195,7 @@ class TVMNet(nn.Module):
         tokens = self._tokens(x)
         dtokens = lucid.zeros_like(tokens)
         for block in self.blocks:
-            tokens, dtokens = block.jvp(tokens, dtokens, act, dact)
+            tokens, dtokens = self._checkpointed(block.jvp, tokens, dtokens, act, dact)
         out, dout = self.final.jvp(tokens, dtokens, act, dact)
         return (
             self._scale(self._unpatchify(out), guidance),

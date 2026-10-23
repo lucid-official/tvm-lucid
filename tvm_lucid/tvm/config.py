@@ -69,6 +69,13 @@ class TVMConfig:
             none.
         detach_jvp
             Stop the gradient at ∂F/∂s (an ablation; the paper does not).
+
+    Engineering (not part of the method)
+        gradient_checkpointing
+            Recompute each block during backward instead of keeping its
+            activations.  The written-out JVP keeps ~0.8 GiB per image at
+            S/2 (51 GiB at batch 64 — more than a 36 GB Mac); checkpointed,
+            only the block inputs stay, for one extra forward of compute.
     """
 
     sample_size: int = 32
@@ -103,6 +110,8 @@ class TVMConfig:
     target_ema_decay: float = 0.99
     eval_ema_decay: float | None = 0.9999
     detach_jvp: bool = False
+
+    gradient_checkpointing: bool = False
 
     def __post_init__(self) -> None:
         if self.sample_size % self.patch_size:

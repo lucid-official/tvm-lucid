@@ -15,6 +15,7 @@ patch_size = 2
 guidance_scale = 2.0       # constant CFG w trained at (paper: 2.0 best one-step)
 target_ema_decay = 0.99    # θ*  (Table 4b)
 eval_ema_decay = 0.999     # θ** (paper 0.9999 over 300k steps; shorter run here)
+gradient_checkpointing = true  # 51 GiB of activations at batch 64 otherwise
 # time_sampler = "gap"     # gap* with (−0.8, 1.0), (−0.4, 1.0) is the default
 # scaled_parameterization = true
 

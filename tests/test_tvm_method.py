@@ -143,6 +143,24 @@ class TestNetwork:
         assert abs(numeric) > 1e-2
         assert abs(analytic - numeric) <= 5e-3 * abs(numeric)
 
+    def test_gradient_checkpointing_changes_no_gradient(self) -> None:
+        """Recomputing each block in backward gives the gradients of keeping it."""
+        lucid.manual_seed(13)
+        plain = _wake(TVMNet(_tiny())).train()
+        recomputed = TVMNet(_tiny(gradient_checkpointing=True)).train()
+        recomputed.load_state_dict(plain.state_dict())
+        x, t, s, labels, w = _inputs("cpu")
+        probe = lucid.randn((3, 3, 8, 8))
+        for net in (plain, recomputed):
+            u, du = net.jvp_s(x, t, s, labels, w)
+            ((u + du) * probe).sum().backward()
+            (net(x, s, s, labels, w) * probe).sum().backward()
+        reference = dict(plain.named_parameters())
+        for name, param in recomputed.named_parameters():
+            assert param.grad is not None, name
+            expected = reference[name].grad
+            assert _max(param.grad - expected) <= 1e-4 * max(_max(expected), 1e-6), name
+
     def test_the_block_is_invariant_to_its_modulation_scale(self) -> None:
         """Eq. 16: each shift, scale and gate is RMS-normalised, so scaling the
         modulation projection (weight and bias) changes nothing."""
@@ -306,6 +324,7 @@ class TestZooParity:
     @staticmethod
     def _zoo_config(zoo, **overrides: object):  # type: ignore[no-untyped-def]
         fields = dict(_tiny(**overrides).__dict__)
+        fields.pop("gradient_checkpointing")  # engineering, not a field of the method
         return zoo.TVMConfig(**fields, latent_mean=(0.0,) * 3, latent_std=(1.0,) * 3)
 
     def test_the_networks_agree(self, zoo) -> None:  # type: ignore[no-untyped-def]
