@@ -111,12 +111,21 @@ class TVM(nn.Module):
 
         Paired by name: two identically built networks need not list their
         parameters in the same order once anything has been re-assigned.
+
+        Ends by evaluating the averages (and with them the live weights they
+        read).  On Metal every op is lazy, and θ** is not read again until the
+        next evaluation, so without the flush each step would chain one more
+        update onto it — holding every past copy of the weights alive, and
+        making each step slower than the last.
         """
         live = dict(self.net.named_parameters())
+        updated: list[Tensor] = []
         with lucid.no_grad():
             for key, decay in self._decays().items():
                 for name, slow in self._average(key).named_parameters():
                     slow.copy_(slow * decay + live[name].detach() * (1.0 - decay))
+                    updated.append(slow)
+        lucid.eval(*updated, *live.values())
 
     # ── training variables ───────────────────────────────────────────────
 

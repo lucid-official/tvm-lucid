@@ -137,6 +137,10 @@ class Trainer:
         totals = {"loss": 0.0, "terminal": 0.0, "fm": 0.0}
         for images, labels in micro:
             out = model(lucid.tensor(images, device=DEVICE), lucid.tensor(labels, device=DEVICE))
+            # Flush the forward graph before backward, as Lucid recommends on
+            # Metal: one lazy graph spanning forward, backward and the update is
+            # much slower to schedule.  update_ema() flushes the update itself.
+            lucid.eval(out.loss, out.terminal, out.flow_matching)
             (out.loss / len(micro)).backward()
             # One scalar read per micro-batch: it is also the non-finite guard,
             # and it lets the step time below mean something.
