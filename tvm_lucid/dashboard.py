@@ -7,12 +7,14 @@ Every write goes to a temporary file that then replaces ``dashboard.png`` in
 one step, so a viewer never reads half an image.  Preview reloads the file
 when it changes; the HTML page re-fetches it every 30 seconds in any browser.
 
-A 2x2 grid of training curves above the sampler's denoising path:
+A 2x2 grid of training curves above the few-step samplers' states:
 
     loss: per iteration and per epoch     samples: FID · held-out FM error
     optimisation: ‖∇θ‖ · update ratio     consistency: flow-map gap · sample std
-    noise x_1 → data x_0 in ``eval.dashboard_nfe`` jumps of the evaluation
-    network, one class per row, from the same noise at every redraw
+    the noise x_1, then every state of the ``eval.dashboard_nfe``-step samplers
+    (1 and 2) of the evaluation network, one class per column, same noise always
+
+The NFE curves show the same step counts only.
 
 The loss panel draws the three terms of Eq. 15 together, each both as the
 running loss by optimiser step and as its epoch mean.  The full set of
@@ -101,8 +103,8 @@ class Dashboard:
     ----------
     run_dir : Path
         The run directory; the logs are read from it and the image written to it.
-    nfe : int
-        Jumps in the denoising path.
+    nfe : tuple[int, ...]
+        Sampler step counts shown: the strip's samplers and the NFE curves.
     seed : int
         Seed of its fixed noise.
     steps_per_epoch : int
@@ -117,7 +119,7 @@ class Dashboard:
     def __init__(
         self,
         run_dir: Path,
-        nfe: int,
+        nfe: tuple[int, ...],
         seed: int,
         steps_per_epoch: int,
         fid_every: int,
@@ -143,10 +145,13 @@ class Dashboard:
         training = model.training
         model.eval()
         try:
-            states = model.trajectory(
-                len(CLASSES), labels=self.labels, steps=self.nfe, noise=self.noise
-            )
-            path = np.stack([x.to("cpu").numpy() for x in states])  # (nfe + 1, 10, 3, 32, 32)
+            rows = [("noise x₁", self.noise)]
+            for n in self.nfe:
+                states = model.trajectory(
+                    len(CLASSES), labels=self.labels, steps=n, noise=self.noise
+                )
+                rows += [(f"{n} NFE, t={1 - k / n:.3g}", x) for k, x in enumerate(states[1:], 1)]
+            strip = np.stack([x.to("cpu").numpy() for _, x in rows])  # (rows, 10, 3, 32, 32)
         finally:
             model.train(training)
         decay = model.config.eval_ema_decay
@@ -154,7 +159,7 @@ class Dashboard:
         if decay is not None and decay**step >= 0.01:
             # Without warm-up, θ** is still γ^step the initial weights: say so while it shows.
             network = f"θ** (EMA {decay:g}, still {decay**step:.0%} the initial weights)"
-        fig = self._figure(path, epoch, step, note, network)
+        fig = self._figure(strip, [label for label, _ in rows], epoch, step, note, network)
         tmp = self.path.with_name(".dashboard.tmp.png")
         fig.savefig(tmp, dpi=100)
         plt.close(fig)
@@ -163,7 +168,13 @@ class Dashboard:
     # ── the figure ───────────────────────────────────────────────────────
 
     def _figure(
-        self, path: np.ndarray, epoch: float, step: int, note: str, network: str
+        self,
+        strip: np.ndarray,
+        rows: list[str],
+        epoch: float,
+        step: int,
+        note: str,
+        network: str,
     ) -> plt.Figure:
         metrics = read_jsonl(self.run_dir / "metrics.jsonl")
         epochs = read_jsonl(self.run_dir / "epoch.jsonl")
@@ -180,19 +191,16 @@ class Dashboard:
         self._optimisation(fig.add_subplot(grid[1, 0]), dyn)
         self._consistency(fig.add_subplot(grid[1, 1]), epochs)
 
-        # Ten classes as two halves side by side, so the path spans the width.
-        half = path.shape[1] // 2
-        left, right = fig.add_subplot(grid[2, 0]), fig.add_subplot(grid[2, 1])
-        self._path(left, path[:, :half], CLASSES[:half])
-        self._path(right, path[:, half:], CLASSES[half:])
-        fig.text(
-            0.5, left.get_position().y1 + 0.008,
-            f"denoising path of {network}: noise x₁ → data x₀ in {path.shape[0] - 1} jumps "
-            "(the same noise at every redraw; one class per row)",
-            ha="center", va="bottom", fontsize=13,
+        ax = fig.add_subplot(grid[2, :])
+        self._strip(ax, strip, rows, [1, *self.nfe])
+        shown = " and ".join(str(n) for n in self.nfe)
+        ax.set_title(
+            f"{network}: noise x₁ → data x₀ at {shown} NFE "
+            "(the same noise at every redraw; one class per column)",
+            fontsize=13, pad=24,
         )  # fmt: skip
 
-        fids = [num(r[k]) for r in epochs for k in r if k.startswith("fid_nfe")]
+        fids = [num(r[f"fid_nfe{n}"]) for r in epochs for n in self.nfe if f"fid_nfe{n}" in r]
         fids = [f for f in fids if math.isfinite(f)]
         parts = [self.run_dir.name, f"epoch {epoch:.2f}", f"step {step:,}"]
         if steps:
@@ -240,10 +248,7 @@ class Dashboard:
     def _samples(self, ax: Axes, epochs: list[dict[str, Any]]) -> None:
         title = "samples: FID by NFE · held-out flow-matching error"
         prefix = "fid_nfe"
-        keys = sorted(
-            {k for r in epochs for k in r if k.startswith(prefix) and k[len(prefix) :].isdigit()},
-            key=lambda k: int(k[len(prefix) :]),
-        )
+        keys = [f"{prefix}{n}" for n in self.nfe if any(f"{prefix}{n}" in r for r in epochs)]
         ema = any("probe_fm_ema_mean" in r for r in epochs)
         probe = "probe_fm_ema_mean" if ema else "probe_fm_live_mean"
         if not keys and not any(probe in r for r in epochs):
@@ -286,8 +291,14 @@ class Dashboard:
     def _consistency(self, ax: Axes, epochs: list[dict[str, Any]]) -> None:
         """Do few-step samples land where many-step ones do, with the data's spread?"""
         title = "consistency: flow-map gap · sample std"
-        gaps = sorted({k for r in epochs for k in r if k.startswith("flowmap_gap_")})
-        stds = sorted({k for r in epochs for k in r if k.startswith("sample_std_nfe")})
+        gaps = sorted(
+            {k for r in epochs for k in r if k.startswith("flowmap_gap_")},
+            key=lambda k: int(k.removeprefix("flowmap_gap_").split("v")[0]),
+        )
+        gaps = [k for k in gaps if int(k.removeprefix("flowmap_gap_").split("v")[0]) in self.nfe]
+        stds = [
+            f"sample_std_nfe{n}" for n in self.nfe if any(f"sample_std_nfe{n}" in r for r in epochs)
+        ]
         if not gaps and not stds:
             return _empty(ax, title, "after the first epoch")
         for key, colour in zip(gaps, _NFE_COLOURS, strict=False):
@@ -306,24 +317,31 @@ class Dashboard:
         twin.set_ylabel("sample std", fontsize=9)
         _finish(ax, title, "epoch", twin)
 
-    # ── the denoising path ───────────────────────────────────────────────
+    # ── the samplers' states ─────────────────────────────────────────────
 
     @staticmethod
-    def _path(ax: Axes, path: np.ndarray, classes: tuple[str, ...]) -> None:
-        """Rows are classes, columns are the states at t = 1 … 0, 2-pixel gaps."""
-        n_t, n_cls = int(path.shape[0]), int(path.shape[1])
-        gap, side = 2, 32
-        canvas = np.ones((n_cls * (side + gap) - gap, n_t * (side + gap) - gap, 3))
-        pixels = np.clip((path.transpose(0, 1, 3, 4, 2) + 1.0) / 2.0, 0.0, 1.0)
-        for j in range(n_t):
-            for i in range(n_cls):
-                top, left = i * (side + gap), j * (side + gap)
-                canvas[top : top + side, left : left + side] = pixels[j, i]
+    def _strip(ax: Axes, strip: np.ndarray, rows: list[str], groups: list[int]) -> None:
+        """Rows are states, a wider gap between samplers; columns are classes."""
+        n_cls = int(strip.shape[1])
+        side, gap, between = 32, 2, 10
+        tops, top = [], 0
+        for size in groups:
+            for _ in range(size):
+                tops.append(top)
+                top += side + gap
+            top += between - gap
+        canvas = np.ones((tops[-1] + side, n_cls * (side + gap) - gap, 3))
+        pixels = np.clip((strip.transpose(0, 1, 3, 4, 2) + 1.0) / 2.0, 0.0, 1.0)
+        for i, y in enumerate(tops):
+            for j in range(n_cls):
+                x = j * (side + gap)
+                canvas[y : y + side, x : x + side] = pixels[i, j]
         ax.imshow(canvas, interpolation="nearest")
-        ax.set_xticks([j * (side + gap) + side / 2 for j in range(n_t)])
-        ax.set_xticklabels([f"t={1 - j / (n_t - 1):.3g}" for j in range(n_t)], fontsize=8)
-        ax.set_yticks([i * (side + gap) + side / 2 for i in range(n_cls)])
-        ax.set_yticklabels(classes, fontsize=10)
+        ax.xaxis.tick_top()
+        ax.set_xticks([j * (side + gap) + side / 2 for j in range(n_cls)])
+        ax.set_xticklabels(CLASSES[:n_cls], fontsize=10)
+        ax.set_yticks([y + side / 2 for y in tops])
+        ax.set_yticklabels(rows, fontsize=10)
         ax.tick_params(length=0)
         for spine in ax.spines.values():
             spine.set_visible(False)

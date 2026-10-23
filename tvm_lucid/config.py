@@ -57,7 +57,7 @@ class EvalConfig:
     fid_batch: int = 250
     sample_batch: int = 500
     dashboard: bool = True  # runs/<run>/dashboard.png, rewritten in place every epoch
-    dashboard_nfe: int = 8  # jumps shown in its noise -> data strip
+    dashboard_nfe: tuple[int, ...] = (1, 2)  # samplers in its strip and NFE curves
     dashboard_every_steps: int = 0  # also redraw every N optimiser steps (0: epochs only)
 
 

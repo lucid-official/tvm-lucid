@@ -182,7 +182,9 @@ reloading it every 30 seconds.
 |---|---|---|
 | top | **loss**: total, terminal and flow matching, as running loss per iteration (lines) and epoch means (markers), step and epoch axes | **samples**: FID by NFE, and the held-out flow-matching error of $\theta^{**}$ |
 | middle | **optimisation**: global gradient norm and update ratio $\lVert\Delta\theta\rVert/\lVert\theta\rVert$ | **consistency**: flow-map gap (K-step vs N-step) and sample std against the data's |
-| bottom | the denoising path, one class per row, from the same noise $x_1$ to $x_0$ in 8 jumps of $\theta^{**}$ (both columns) | |
+| bottom | the 1- and 2-step samplers of $\theta^{**}$ from the same noise $x_1$: the noise, the 1-NFE sample, the 2-NFE midpoint and sample, one class per column (both columns) | |
+
+The FID and consistency curves likewise show only `eval.dashboard_nfe` (1 and 2 NFE).
 
 The full set of dynamics plots (per-block norms, EMA lag, activation RMS, error by time) is
 `scripts/plot_dynamics.py`.
