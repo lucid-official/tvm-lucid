@@ -76,17 +76,18 @@ class TVM(nn.Module):
         return decays
 
     def _average(self, name: str) -> TVMNet:
+        device = next(iter(self.net.parameters())).device.type
         if not self._averages:
             live = dict(self.net.named_parameters())
             for key in self._decays():
-                copy = TVMNet(self.config).eval()
+                # Onto the live weights' device first: copy_ does not cross devices.
+                copy = TVMNet(self.config).to(device).eval()
                 with lucid.no_grad():
                     for param_name, param in copy.named_parameters():
                         param.requires_grad_(False)
                         param.copy_(live[param_name].detach())
                 self._averages[key] = copy
         average = self._averages[name]
-        device = next(iter(self.net.parameters())).device.type
         if next(iter(average.parameters())).device.type != device:
             average.to(device)
         return average

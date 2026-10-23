@@ -110,7 +110,12 @@ class TestNetwork:
         assert _max(along_s - fd) <= 2e-3 * _max(fd) + 1e-4
 
     def test_the_gradient_flows_through_the_tangent(self) -> None:
-        """d/dθ ⟨∂u/∂s, R⟩ against a central difference in weight space."""
+        """d/dθ ⟨∂u/∂s, R⟩ against a central difference in weight space.
+
+        A plain central difference is off by O(h²) — several percent at
+        h = 1e-2 for a random direction through a deep net — so two step sizes
+        are combined (Richardson) to cancel that term; what remains is ~1e-4.
+        """
         lucid.manual_seed(2)
         net = _wake(TVMNet(_tiny())).eval()
         x, t, s, labels, w = _inputs("cpu")
@@ -129,12 +134,14 @@ class TestNetwork:
                 weight.copy_(original + direction * shift)
                 return float((net.jvp_s(x, t, s, labels, w)[1] * probe).sum().item())
 
-        h = 1e-2
-        numeric = (objective(h) - objective(-h)) / (2 * h)
+        def central(h: float) -> float:
+            return (objective(h) - objective(-h)) / (2 * h)
+
+        numeric = (4.0 * central(5e-3) - central(1e-2)) / 3.0
         with lucid.no_grad():
             weight.copy_(original)
         assert abs(numeric) > 1e-2
-        assert abs(analytic - numeric) <= 2e-2 * abs(numeric)
+        assert abs(analytic - numeric) <= 5e-3 * abs(numeric)
 
     def test_the_block_is_invariant_to_its_modulation_scale(self) -> None:
         """Eq. 16: each shift, scale and gate is RMS-normalised, so scaling the
