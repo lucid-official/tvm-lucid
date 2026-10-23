@@ -25,6 +25,7 @@ from tvm_lucid.tvm.layers import (
     Block,
     FinalLayer,
     ScalarEmbedder,
+    silu,
     silu_jvp,
     sincos_position_embedding,
     spectral_,
@@ -148,10 +149,11 @@ class TVMNet(nn.Module):
             + self.guidance_embed(1.0 / guidance)
             + self.label_embed(labels)
         )
+        act = silu(cond)
         tokens = self._tokens(x)
         for block in self.blocks:
-            tokens = block(tokens, cond)
-        return self._scale(self._unpatchify(self.final(tokens, cond)), guidance)
+            tokens = block(tokens, act)
+        return self._scale(self._unpatchify(self.final(tokens, act)), guidance)
 
     def jvp_s(
         self,

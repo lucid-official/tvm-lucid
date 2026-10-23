@@ -31,6 +31,15 @@ Each rule is the textbook derivative; with :math:`\dot{x}` the tangent,
 
 and ``tests/test_tvm_method.py`` checks the composite against a central
 finite difference of ``forward``.
+
+**Why** ``forward`` **is written out too.**  ``forward`` uses the same
+primitives as the primal half of ``jvp`` — attention as matmul and softmax,
+GELU, RMSNorm and SiLU as elementwise formulas — rather than
+``F.scaled_dot_product_attention``, ``F.gelu`` and ``F.rms_norm``.  Under
+autograd on Metal those three were the slow part of a step: the flow-matching
+forward that used them cost 0.12 s per image, the written-out ``jvp`` path
+0.026 s per forward-equivalent (S/2, batch 64).  It also makes ``forward`` and
+the primal of ``jvp`` the same computation, not merely the same function.
 """
 
 import math
@@ -71,9 +80,18 @@ def linear_jvp(layer: nn.Linear, x: Tensor, dx: Tensor) -> tuple[Tensor, Tensor]
     return layer(x), F.linear(dx, layer.weight)
 
 
+def silu(x: Tensor) -> Tensor:
+    return x * F.sigmoid(x)
+
+
 def silu_jvp(x: Tensor, dx: Tensor) -> tuple[Tensor, Tensor]:
     sig = F.sigmoid(x)
     return x * sig, dx * sig * (1.0 + x * (1.0 - sig))
+
+
+def gelu_tanh(x: Tensor) -> Tensor:
+    """``F.gelu(x, approximate="tanh")``."""
+    return 0.5 * x * (1.0 + lucid.tanh(_GELU_C * (x + _GELU_K * x * x * x)))
 
 
 def gelu_tanh_jvp(x: Tensor, dx: Tensor) -> tuple[Tensor, Tensor]:
@@ -86,7 +104,8 @@ def gelu_tanh_jvp(x: Tensor, dx: Tensor) -> tuple[Tensor, Tensor]:
 
 def rms_norm(x: Tensor, weight: Tensor | None = None) -> Tensor:
     """RMS-normalise the last axis (no affine unless ``weight``)."""
-    return F.rms_norm(x, (int(x.shape[-1]),), weight=weight, eps=NORM_EPS)
+    y = x * lucid.rsqrt((x * x).mean(dim=-1, keepdim=True) + NORM_EPS)
+    return y if weight is None else y * weight
 
 
 def rms_norm_jvp(x: Tensor, dx: Tensor, weight: Tensor | None = None) -> tuple[Tensor, Tensor]:
@@ -176,7 +195,7 @@ class ScalarEmbedder(nn.Module):
         self.fc2 = nn.Linear(width, width)
 
     def forward(self, value: Tensor) -> Tensor:
-        return self.fc2(self.act(self.fc1(sinusoid(value, self.freq_size))))
+        return self.fc2(silu(self.fc1(sinusoid(value, self.freq_size))))
 
     def jvp(self, value: Tensor, dvalue: Tensor) -> tuple[Tensor, Tensor]:
         h, dh = sinusoid_jvp(value, dvalue, self.freq_size)
@@ -222,8 +241,10 @@ class Attention(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         q, k, v = self._heads(self.qkv(x))
-        q, k = self.q_norm(q), self.k_norm(k)
-        return self.proj(self._merge(F.scaled_dot_product_attention(q, k, v)))
+        if self.qk_norm:
+            q, k = rms_norm(q, self.q_norm.weight), rms_norm(k, self.k_norm.weight)
+        logits = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(self.head_dim))
+        return self.proj(self._merge(F.softmax(logits, dim=-1) @ v))
 
     def jvp(self, x: Tensor, dx: Tensor) -> tuple[Tensor, Tensor]:
         qkv, dqkv = linear_jvp(self.qkv, x, dx)
@@ -251,7 +272,7 @@ class FeedForward(nn.Module):
         self.fc2 = nn.Linear(inner, width)
 
     def forward(self, x: Tensor) -> Tensor:
-        return self.fc2(F.gelu(self.fc1(x), approximate="tanh"))
+        return self.fc2(gelu_tanh(self.fc1(x)))
 
     def jvp(self, x: Tensor, dx: Tensor) -> tuple[Tensor, Tensor]:
         h, dh = linear_jvp(self.fc1, x, dx)
@@ -277,10 +298,11 @@ class Block(nn.Module):
         self.mlp = FeedForward(width, int(width * mlp_ratio))
         self.ada_ln = nn.Sequential(nn.SiLU(), nn.Linear(width, 6 * width))
 
-    def forward(self, x: Tensor, cond: Tensor) -> Tensor:
+    def forward(self, x: Tensor, act: Tensor) -> Tensor:
+        """``act`` is ``SiLU(cond)``, computed once and shared by every block."""
         width = int(x.shape[-1])
         shift_a, scale_a, gate_a, shift_m, scale_m, gate_m = modulation(
-            self.ada_ln(cond), 6, width, self.modulation_norm
+            self.ada_ln[1](act), 6, width, self.modulation_norm
         )
         x = x + gate_a * self.attn(rms_norm(x) * (1.0 + scale_a) + shift_a)
         return x + gate_m * self.mlp(rms_norm(x) * (1.0 + scale_m) + shift_m)
@@ -311,8 +333,8 @@ class FinalLayer(nn.Module):
         self.ada_ln = nn.Sequential(nn.SiLU(), nn.Linear(width, 2 * width))
         self.proj = nn.Linear(width, patch_size * patch_size * out_channels)
 
-    def forward(self, x: Tensor, cond: Tensor) -> Tensor:
-        shift, scale = modulation(self.ada_ln(cond), 2, int(x.shape[-1]), self.modulation_norm)
+    def forward(self, x: Tensor, act: Tensor) -> Tensor:
+        shift, scale = modulation(self.ada_ln[1](act), 2, int(x.shape[-1]), self.modulation_norm)
         return self.proj(rms_norm(x) * (1.0 + scale) + shift)
 
     def jvp(self, x: Tensor, dx: Tensor, act: Tensor, dact: Tensor) -> tuple[Tensor, Tensor]:

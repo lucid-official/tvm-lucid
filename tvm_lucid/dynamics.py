@@ -138,12 +138,16 @@ class ActivationProbe:
 
 
 def activation_probe(model: TVM) -> ActivationProbe:
-    """Figure 4's quantities: the time embedding and the last raw modulation."""
+    """Figure 4's quantities: the time embedding and the last raw modulation.
+
+    The modulation is read at the adaLN *linear* (``ada_ln[1]``): the blocks
+    apply SiLU once to the shared conditioning and call the linear directly.
+    """
     net = model.net
     return ActivationProbe(
         {
             "time_embed": net.time_embed,
-            "adaln_last": net.blocks[len(net.blocks) - 1].ada_ln,
-            "adaln_final": net.final.ada_ln,
+            "adaln_last": net.blocks[len(net.blocks) - 1].ada_ln[1],
+            "adaln_final": net.final.ada_ln[1],
         }
     )
