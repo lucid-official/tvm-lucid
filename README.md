@@ -193,8 +193,9 @@ together share a colour, such as the two pandas and the shuttle's booster and or
 
 <p align="center">
   <img src="assets/analysis_jumps.jpg" width="100%"><br>
-  <sub>Top rows: $`x_t = (1-t)\,x_0 + t\,\epsilon`$ as in training, with $`x_0`$ an 8-NFE sample and fresh noise
-  $`\epsilon`$. Bottom rows: one network evaluation from $`x_t`$ straight to $`t = 0`$.</sub>
+  <sub>Top rows: <i>x<sub>t</sub></i> = (1 − <i>t</i>) <i>x</i><sub>0</sub> + <i>t</i> ε as in training, with
+  <i>x</i><sub>0</sub> an 8-NFE sample and fresh noise ε. Bottom rows: one network evaluation from
+  <i>x<sub>t</sub></i> straight to <i>t</i> = 0.</sub>
 </p>
 
 From $`t = 1`$ the jump makes a different image, because pure noise holds nothing of $`x_0`$. From
