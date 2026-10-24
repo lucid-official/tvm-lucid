@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>TVM · ImageNet</title>
+<style>
+  :root {
+    --bg: #f6f6f4; --card: #ffffff; --ink: #18181b; --muted: #6b6b73; --line: #e4e4e0;
+    --accent: #3b5bdb; --accent-ink: #ffffff; --chip: #eef0f6; --chip-on: #3b5bdb; --track: #e7e9f0;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #111113; --card: #1b1b1f; --ink: #ececf0; --muted: #9a9aa5; --line: #2c2c33;
+      --accent: #748ffc; --accent-ink: #0b0b0d; --chip: #26262d; --chip-on: #748ffc; --track: #2a2a32;
+      color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 16px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+    padding: max(16px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom));
+  }
+  main { max-width: 560px; margin: 0 auto; display: grid; gap: 14px; }
+  header h1 { font-size: 22px; margin: 4px 0 2px; letter-spacing: -0.01em; }
+  header p { margin: 0; color: var(--muted); font-size: 13px; }
+  .status { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #f59f00; flex: none; }
+  .dot.ok { background: #37b24d; } .dot.err { background: #e03131; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 14px; }
+  .label { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-bottom: 8px; display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .models { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .model {
+    border: 1.5px solid var(--line); background: var(--bg); color: var(--ink); border-radius: 12px; padding: 10px 8px;
+    text-align: left; cursor: pointer; font: inherit; -webkit-tap-highlight-color: transparent; position: relative;
+  }
+  .model b { display: block; font-size: 16px; }
+  .model span { display: block; font-size: 12px; color: var(--muted); line-height: 1.35; }
+  .model .tag { margin-top: 6px; font-size: 11px; font-weight: 600; }
+  .model.on { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+  .model:disabled { opacity: .45; cursor: not-allowed; }
+  .tag.loaded { color: #37b24d; } .tag.loading { color: #f59f00; } .tag.err { color: #e03131; }
+  input[type=search], input[type=number] {
+    width: 100%; font-size: 16px; padding: 11px 12px; border-radius: 10px;
+    border: 1px solid var(--line); background: var(--bg); color: var(--ink); outline: none;
+  }
+  input:focus { border-color: var(--accent); }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; max-height: 190px; overflow-y: auto; }
+  .chip {
+    border: 0; border-radius: 999px; padding: 7px 11px; font-size: 14px; background: var(--chip); color: var(--ink);
+    cursor: pointer; -webkit-tap-highlight-color: transparent;
+  }
+  .chip.on { background: var(--chip-on); color: var(--accent-ink); }
+  .selected { margin-top: 10px; font-size: 15px; }
+  .selected b { font-size: 17px; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .ghost { border: 1px solid var(--line); background: transparent; color: var(--ink); border-radius: 10px; padding: 9px 12px; font-size: 14px; cursor: pointer; white-space: nowrap; }
+  .knob { display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: center; }
+  .knob output { font-size: 34px; font-weight: 700; min-width: 2ch; text-align: right; font-variant-numeric: tabular-nums; }
+  input[type=range] { width: 100%; accent-color: var(--accent); height: 32px; }
+  .ticks { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); padding: 0 2px; }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  details summary { cursor: pointer; color: var(--muted); font-size: 14px; }
+  details .grid { display: grid; gap: 12px; margin-top: 12px; }
+  .go {
+    width: 100%; border: 0; border-radius: 14px; padding: 16px; font-size: 17px; font-weight: 600;
+    background: var(--accent); color: var(--accent-ink); cursor: pointer;
+  }
+  .go:disabled { opacity: .55; }
+  .progress { display: grid; gap: 6px; }
+  .bar { height: 10px; border-radius: 999px; background: var(--track); overflow: hidden; position: relative; }
+  .fill { height: 100%; width: 0; background: var(--accent); border-radius: 999px; transition: width .15s linear; }
+  .bar.busy .fill {
+    width: 100% !important; transition: none; opacity: .55;
+    background: repeating-linear-gradient(45deg, var(--accent) 0 10px, transparent 10px 20px);
+    background-size: 28px 28px; animation: slide 0.8s linear infinite;
+  }
+  @keyframes slide { from { background-position: 0 0; } to { background-position: 28px 0; } }
+  .ticks2 { display: flex; gap: 3px; }
+  .ticks2 i { flex: 1; height: 4px; border-radius: 2px; background: var(--track); }
+  .ticks2 i.on { background: var(--accent); }
+  .ticks2 i.vae { flex: 1.4; }
+  .ptext { display: flex; justify-content: space-between; font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .result img { width: 100%; aspect-ratio: 1; display: block; border-radius: 12px; background: var(--chip); object-fit: cover; image-rendering: auto; }
+  .meta { margin-top: 10px; font-size: 14px; }
+  .meta .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .actions { display: flex; gap: 8px; margin-top: 12px; }
+  .actions a { flex: 1; text-align: center; text-decoration: none; }
+  .btn { display: inline-block; border-radius: 12px; padding: 12px; font-size: 15px; font-weight: 600; background: var(--chip); color: var(--ink); }
+  .btn.primary { background: var(--accent); color: var(--accent-ink); }
+  .history { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+  .history img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 8px; cursor: pointer; display: block; }
+  .error { color: #e03131; font-size: 14px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>TVM · ImageNet</h1>
+    <p>The released Terminal Velocity Matching checkpoints · DiT-XL/2, 678M · Lucid on a Mac Studio</p>
+    <div class="status"><span class="dot" id="dot"></span><span id="status">connecting…</span></div>
+  </header>
+
+  <section class="card">
+    <div class="label"><span>Model</span><span id="modelNote"></span></div>
+    <div class="models" id="models"></div>
+  </section>
+
+  <section class="card">
+    <div class="label"><span>Class</span><span id="count"></span></div>
+    <div class="row">
+      <input type="search" id="search" placeholder="Search 1,000 classes — e.g. panda" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <button class="ghost" id="random" type="button" title="Random class">🎲</button>
+    </div>
+    <div class="chips" id="chips"></div>
+    <div class="selected" id="selected"></div>
+  </section>
+
+  <section class="card">
+    <div class="label"><span>Steps (NFE)</span><span id="estimate"></span></div>
+    <div class="knob">
+      <input type="range" id="nfe" min="1" max="8" step="1" value="1">
+      <output id="nfeOut">1</output>
+    </div>
+    <div class="ticks"><span>1</span><span>2</span><span>3</span><span>4</span><span>5</span><span>6</span><span>7</span><span>8</span></div>
+    <div class="hint">One network evaluation is the whole point of TVM; more steps sharpen detail.</div>
+    <details>
+      <summary>Advanced</summary>
+      <div class="grid">
+        <div>
+          <div class="label"><span>Guidance w</span><span id="wOut"></span></div>
+          <input type="range" id="w" min="1" max="4" step="0.25" value="2.5">
+          <div class="hint">Resets to the model's trained weight when you switch models.</div>
+        </div>
+        <div>
+          <div class="label"><span>Seed</span></div>
+          <div class="row">
+            <input type="number" id="seed" placeholder="random" inputmode="numeric" min="0">
+            <label class="row" style="font-size:14px;gap:6px;white-space:nowrap"><input type="checkbox" id="lock"> keep</label>
+          </div>
+          <div class="hint">“keep” reuses the last seed, so you can compare step counts on the same noise.</div>
+        </div>
+      </div>
+    </details>
+  </section>
+
+  <button class="go" id="go" type="button" disabled>Generate</button>
+
+  <section class="progress" id="progress" hidden>
+    <div class="bar" id="bar"><div class="fill" id="fill"></div></div>
+    <div class="ticks2" id="segments"></div>
+    <div class="ptext"><span id="ptext"></span><span id="ptime"></span></div>
+  </section>
+  <div class="error" id="error" hidden></div>
+
+  <section class="card result" id="result" hidden>
+    <img id="image" alt="">
+    <div class="meta"><div id="caption"></div><div class="sub" id="timing"></div></div>
+    <div class="actions">
+      <a class="btn primary" id="download" href="#">Download PNG</a>
+      <a class="btn" id="open" href="#" target="_blank">Open full size</a>
+    </div>
+    <div class="hint">On iPhone you can also press and hold the image → Save to Photos.</div>
+  </section>
+
+  <section class="card" id="historyCard" hidden>
+    <div class="label"><span>This session</span></div>
+    <div class="history" id="history"></div>
+  </section>
+</main>
+
+<script>
+const QUICK = [88, 207, 279, 291, 330, 360, 387, 388, 417, 812, 933, 963, 970, 973, 974, 980];
+const $ = (id) => document.getElementById(id);
+let classes = [], label = 207, status = null, model = null, history = [], lastSeed = null;
+let running = false, statusTimer = null;
+
+const title = (i) => classes[i] ? classes[i].replace(/(^|\s)\S/g, (c) => c.toUpperCase()) : `#${i}`;
+const info = (name) => status && status.models.find((m) => m.name === name);
+const fidText = (m) => Object.entries(m.fid).map(([k, v]) => `FID ${v} @${k}`).join(", ");
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// ── models ────────────────────────────────────────────────────────────
+function renderModels() {
+  if (!status) return;
+  $("models").replaceChildren(...status.models.map((m) => {
+    const b = document.createElement("button");
+    b.type = "button"; b.className = "model" + (m.name === model ? " on" : ""); b.disabled = !m.available || running;
+    let tag = "", cls = "";
+    if (!m.available) { tag = "not converted"; }
+    else if (status.loading === m.name) { tag = "loading…"; cls = "loading"; }
+    else if (status.loaded === m.name) { tag = "loaded"; cls = "loaded"; }
+    else if (m.error) { tag = "failed"; cls = "err"; }
+    else { tag = "tap to load"; }
+    b.innerHTML = `<b>${m.image_size}×${m.image_size}</b><span>w ${m.default_w}</span><span>${fidText(m)}</span><span class="tag ${cls}">${tag}</span>`;
+    b.title = m.name + (m.error ? ` — ${m.error}` : "");
+    b.onclick = () => chooseModel(m.name);
+    return b;
+  }));
+  const m = info(model);
+  $("modelNote").textContent = m ? m.name : "";
+  const ready = status.loaded === model && !status.loading;
+  $("go").disabled = running || !ready;
+  if (!running) $("go").textContent = ready ? "Generate" : (status.loading ? "Loading model…" : "Generate");
+  renderKnobs();
+}
+
+async function chooseModel(name) {
+  if (running) return;
+  const changed = name !== model;
+  model = name;
+  const m = info(name);
+  if (changed && m) { $("w").value = m.default_w; }
+  renderModels();
+  if (status.loaded !== name) {
+    await fetch("/model", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: name }) });
+    pollStatus(true);
+  }
+}
+
+// ── status ────────────────────────────────────────────────────────────
+async function pollStatus(fast = false) {
+  clearTimeout(statusTimer);
+  try {
+    status = await (await fetch("/status")).json();
+    if (model === null) model = status.loaded || status.loading || (status.models.find((m) => m.available) || {}).name || null;
+    const m = info(model);
+    const err = m && m.error && status.loaded !== model && !status.loading;
+    $("dot").className = "dot " + (err ? "err" : status.loaded === model ? "ok" : "");
+    $("status").textContent = err ? `failed to load ${model}: ${m.error}`
+      : status.loading ? `loading ${status.loading}${status.loaded ? "" : " (previous model unloaded)"}…`
+      : status.loaded ? `ready · ${status.loaded} · ${status.backend}${status.queued ? ` · ${status.queued} queued` : ""}`
+      : "no model loaded — pick one";
+    renderModels();
+    const waiting = status.loading || (model && status.loaded !== model && !err);
+    statusTimer = setTimeout(() => pollStatus(waiting), waiting || fast ? 400 : 3000);
+  } catch {
+    $("status").textContent = "server unreachable"; $("dot").className = "dot err";
+    statusTimer = setTimeout(pollStatus, 2000);
+  }
+}
+
+// ── classes and knobs ─────────────────────────────────────────────────
+function renderChips() {
+  const q = $("search").value.trim().toLowerCase();
+  let ids;
+  if (!q) ids = QUICK;
+  else if (/^\d+$/.test(q)) ids = [Number(q)].filter((i) => i < 1000);
+  else ids = classes.map((c, i) => [c, i]).filter(([c]) => c.toLowerCase().includes(q)).map(([, i]) => i).slice(0, 60);
+  $("count").textContent = q ? `${ids.length}${ids.length === 60 ? "+" : ""} match${ids.length === 1 ? "" : "es"}` : "quick picks";
+  $("chips").replaceChildren(...ids.map((i) => {
+    const b = document.createElement("button");
+    b.type = "button"; b.className = "chip" + (i === label ? " on" : ""); b.textContent = classes[i] || i;
+    b.onclick = () => { label = i; renderChips(); renderSelected(); };
+    return b;
+  }));
+}
+function renderSelected() { $("selected").innerHTML = `Selected: <b>${title(label)}</b> <span style="color:var(--muted)">#${label}</span>`; }
+function renderKnobs() {
+  const n = Number($("nfe").value);
+  $("nfeOut").textContent = n;
+  $("wOut").textContent = Number($("w").value).toFixed(2);
+  const m = info(model);
+  $("estimate").textContent = m && m.timing ? `≈ ${((m.timing.ms_per_step * n + m.timing.vae_ms) / 1000).toFixed(1)} s` : "";
+}
+
+// ── progress ──────────────────────────────────────────────────────────
+function setupProgress(nfe) {
+  $("progress").hidden = false; $("bar").className = "bar"; $("fill").style.width = "0%";
+  const segs = [];
+  for (let i = 0; i < nfe; i++) segs.push(Object.assign(document.createElement("i"), { title: `step ${i + 1}` }));
+  segs.push(Object.assign(document.createElement("i"), { className: "vae", title: "VAE decode" }));
+  $("segments").replaceChildren(...segs);
+}
+function showProgress(job, timing, elapsed) {
+  const n = job.nfe, segs = $("segments").children;
+  const step = timing ? timing.ms_per_step : 1, vae = timing ? timing.vae_ms : 1.4;
+  const total = n * step + vae;
+  let frac = 0, text = "";
+  $("bar").className = "bar" + (job.phase === "loading" || job.phase === "queued" ? " busy" : "");
+  if (job.phase === "queued") text = job.queue_position ? `Waiting — ${job.queue_position} ahead` : "Starting…";
+  else if (job.phase === "loading") text = `Loading ${job.model}…`;
+  else if (job.phase === "network") { frac = (job.step * step) / total; text = `Step ${Math.min(job.step + 1, n)} / ${n}`; }
+  else if (job.phase === "vae") { frac = (n * step) / total; text = "Decoding with the VAE…"; }
+  else if (job.phase === "done") { frac = 1; text = "Done"; }
+  $("fill").style.width = `${(frac * 100).toFixed(1)}%`;
+  for (let i = 0; i < segs.length; i++) {
+    const done = job.phase === "done" || (i < n ? (job.phase === "vae" || i < job.step) : false);
+    segs[i].className = (i === n ? "vae" : "") + (done ? " on" : "");
+  }
+  $("ptext").textContent = text;
+  $("ptime").textContent = `${(elapsed / 1000).toFixed(1)} s`;
+}
+
+// ── generate ──────────────────────────────────────────────────────────
+function show(item) {
+  $("result").hidden = false;
+  $("image").src = item.url; $("image").alt = item.class_name;
+  $("caption").innerHTML = `<b>${title(item.label)}</b> · ${item.nfe} NFE · w ${item.w} · seed ${item.seed}`;
+  $("timing").textContent = `${item.model} · ${item.image_size}×${item.image_size} · network ${item.network_ms} ms · VAE ${item.vae_ms} ms`;
+  $("download").href = item.url + "?download=1"; $("download").setAttribute("download", item.name);
+  $("open").href = item.url;
+}
+function renderHistory() {
+  $("historyCard").hidden = history.length < 2;
+  $("history").replaceChildren(...history.map((item) => {
+    const img = document.createElement("img");
+    img.src = item.url; img.alt = item.class_name; img.loading = "lazy"; img.title = `${item.model} · ${item.class_name}`;
+    img.onclick = () => { show(item); window.scrollTo({ top: $("result").offsetTop - 12, behavior: "smooth" }); };
+    return img;
+  }));
+}
+
+async function generate() {
+  if (running || !model) return;
+  $("error").hidden = true;
+  const typed = $("seed").value.trim();
+  const seed = typed !== "" ? Number(typed) : ($("lock").checked && lastSeed !== null ? lastSeed : null);
+  const nfe = Number($("nfe").value);
+  const body = { model, label, nfe, w: Number($("w").value), seed };
+  running = true; renderModels(); $("go").textContent = "Generating…";
+  setupProgress(nfe);
+  const start = performance.now();
+  try {
+    const r = await fetch("/generate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const sub = await r.json();
+    if (!r.ok) throw new Error(sub.error || r.statusText);
+    let job;
+    for (;;) {
+      job = await (await fetch(`/job/${sub.job}`)).json();
+      const m = info(job.model);
+      showProgress(job, m && m.timing, performance.now() - start);
+      if (job.phase === "done" || job.phase === "error") break;
+      await sleep(80);
+    }
+    if (job.phase === "error") throw new Error(job.error);
+    const item = job.result;
+    lastSeed = item.seed;
+    if ($("lock").checked) $("seed").placeholder = `${item.seed} (kept)`;
+    history.unshift(item); history = history.slice(0, 24);
+    show(item); renderHistory();
+    $("result").scrollIntoView({ behavior: "smooth", block: "start" });
+  } catch (e) {
+    $("error").textContent = "Failed: " + e.message; $("error").hidden = false;
+  } finally {
+    running = false;
+    setTimeout(() => { if (!running) $("progress").hidden = true; }, 1200);
+    pollStatus();
+  }
+}
+
+$("search").oninput = renderChips;
+$("random").onclick = () => { label = Math.floor(Math.random() * 1000); $("search").value = ""; renderChips(); renderSelected(); };
+$("nfe").oninput = renderKnobs; $("w").oninput = renderKnobs;
+$("lock").onchange = () => { if (!$("lock").checked) $("seed").placeholder = "random"; };
+$("go").onclick = generate;
+
+fetch("/classes.json").then((r) => r.json()).then((c) => { classes = c; renderChips(); renderSelected(); });
+pollStatus().then(() => { const m = info(model); if (m) $("w").value = m.default_w; renderKnobs(); });
+</script>
+</body>
+</html>
