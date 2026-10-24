@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "tvm-lucid"
 version = "0.1.0"
-description = "Terminal Velocity Matching (ICLR 2026) re-implemented on lucid-dl and trained from scratch on Apple Silicon"
+description = "Terminal Velocity Matching (ICLR 2026) re-implemented on Lucid and trained from scratch on Apple Silicon"
 readme = "README.md"
 requires-python = ">=3.14"
 license = { text = "MIT" }
@@ -23,7 +23,7 @@ classifiers = [
 # lucid.func.jvp, whose 3.15.5 form returns its tangent detached.
 dependencies = [
     "lucid-dl>=3.15.5",
-    # lucid-dl 3.15.5 was built against mlx 0.32.3; 0.32.4 changed the ABI
+    # Lucid 3.15.5 was built against mlx 0.32.3; 0.32.4 changed the ABI
     # (mlx::core::array::set_data), and the engine fails to load against it.
     "mlx==0.32.3",
     "numpy",
@@ -37,7 +37,7 @@ Homepage = "https://github.com/lucid-official/tvm-lucid"
 Repository = "https://github.com/lucid-official/tvm-lucid"
 Paper = "https://arxiv.org/abs/2511.19797"
 "Upstream (TVM)" = "https://github.com/lumalabs/tvm"
-"Runtime (lucid-dl)" = "https://github.com/lucid-official/lucid"
+"Runtime (Lucid)" = "https://github.com/lucid-official/lucid"
 
 [project.optional-dependencies]
 test = ["pytest", "scipy"]

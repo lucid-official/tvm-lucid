@@ -4,7 +4,7 @@ r"""The layers of TVM's semi-Lipschitz DiT, each with its derivative along ``s``
 velocity :math:`\frac{d}{ds} f_\theta = F_\theta + (s - t)\,\partial_s F_\theta`,
 and the loss back-propagates *through* :math:`\partial_s F_\theta`.  That
 needs a Jacobian-vector product whose result stays on the autograd graph.
-``lucid.func.jvp`` in lucid-dl 3.15.5 returns its tangent detached — fine
+``lucid.func.jvp`` in Lucid 3.15.5 returns its tangent detached — fine
 for MeanFlow, whose JVP sits under a stop-gradient, not for TVM — so each
 layer here carries its own forward-mode rule: a ``jvp`` method mapping
 ``(input, input tangent)`` to ``(output, output tangent)``, built from the

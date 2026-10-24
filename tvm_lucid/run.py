@@ -37,7 +37,7 @@ def new_run_dir(root: Path, name: str) -> Path:
 
 
 def _lucid_distribution() -> str | None:
-    """The installed ``lucid-dl`` release (None for an unpackaged checkout)."""
+    """The installed Lucid release (None for an unpackaged checkout)."""
     try:
         return metadata.version("lucid-dl")
     except metadata.PackageNotFoundError:
