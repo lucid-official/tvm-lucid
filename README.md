@@ -152,6 +152,115 @@ $`n = 1`$ is one-step generation.
   resized.</sub>
 </p>
 
+## Inside the 512² model
+
+Everything here is measured on `im512_w2p5`, using the noise and classes of the samples at the top. The internals
+are read by writing `TVMNet.forward` out with the model's own modules. That trace reproduces `forward` exactly
+(maximum difference 0.0), and its block-by-block JVP reproduces `jvp_s` exactly.
+
+### Where attention looks
+
+<p align="center">
+  <img src="assets/analysis_attention.jpg" width="100%"><br>
+  <sub>One query patch's attention (blue dot), averaged over the 18 heads, while the network makes the 1-NFE sample
+  in a single evaluation from pure noise. Each map is scaled to the 99.5th percentile of all patches except the
+  query itself, so the query's attention to itself saturates instead of setting the scale.</sub>
+</p>
+
+Block 2 attends along the query's row and column, so it follows position, not content. From block 8 on,
+attention follows what the patch is becoming:
+
+- the face query spreads over the dog's head;
+- the grass query spreads along the lawn;
+- the sky query covers the sky and, through block 26, stops at the ridge.
+
+In the last blocks the face queries also reach, faintly, the second dog and the second panda's face. All of this
+happens in the one evaluation that turns noise into the image.
+
+### What the residual stream encodes
+
+<p align="center">
+  <img src="assets/analysis_pca.jpg" width="100%"><br>
+  <sub>The top three principal components of the residual stream as RGB, fitted jointly over the four images.
+  Each cell is one token, 16×16 pixels of the output.</sub>
+</p>
+
+Block 4 still carries the noise it was given. By block 10 the layout is there: the dog against the lawn, and the
+volcano's ridge against the sky. By blocks 16–22 objects separate from their background, and parts that belong
+together share a colour, such as the two pandas and the shuttle's booster and orbiter.
+
+### One jump from anywhere
+
+<p align="center">
+  <img src="assets/analysis_jumps.jpg" width="100%"><br>
+  <sub>Top rows: $`x_t = (1-t)\,x_0 + t\,\epsilon`$ as in training, with $`x_0`$ an 8-NFE sample and fresh noise
+  $`\epsilon`$. Bottom rows: one network evaluation from $`x_t`$ straight to $`t = 0`$.</sub>
+</p>
+
+From $`t = 1`$ the jump makes a different image, because pure noise holds nothing of $`x_0`$. From
+$`t = 0.8`$, where $`x_t`$ still looks like noise, one jump already recovers the volcano's composition, and from
+$`t = 0.6`$ the two dogs. The jump's latent distance to $`x_0`$ shrinks roughly in proportion to $`t`$: 0.89,
+0.66, 0.43 and 0.21 for the dogs at $`t`$ = 0.8, 0.6, 0.4 and 0.2.
+
+### By the numbers
+
+<p align="center">
+  <img src="assets/analysis_quantitative.png" width="100%">
+</p>
+
+- **(a) Attention reach does not grow with depth.** Each block's mean attention distance lies between 70 and
+  234 px (uniform attention would give 267 px). Every block mixes local heads, down to 24 px, with heads that reach
+  across the image, up to 382 px.
+- **(b) The residual stream grows 10–12× through the 28 blocks.** Its RMS goes from 1.1 to 11.6–13.2, and it is
+  nearly the same at every $`t`$.
+- **(c) The terminal-velocity condition holds to 4–17%.** This is the quantity TVM trains, measured on $`x_t`$
+  built from the model's own 8-NFE samples. It holds best when the jump lands on the data ($`s = 0`$: 3.9% from
+  $`t = 0.125`$, 8.3% from $`t = 1`$), which is the jump one-step sampling makes. It holds worst for long jumps
+  that land just above the data (16–17% from $`t \ge 0.875`$ to $`s`$ = 0.125–0.25).
+- **(d) More steps change the sample gradually.** The latent distance to the 16-NFE sample, with latents whitened
+  to unit variance, falls from 0.34 at 1 NFE to 0.31 at 4 and 0.22 at 8. This matches the step-count grid above,
+  where the first jump sets the layout and later steps refine it.
+
+### The learned flow over (t, s)
+
+TVM's network takes two times, so everything it learned lives on the triangle $`0 \le s \le t \le 1`$. Each
+cell below averages eight of the teaser's classes, with $`x_t = (1-t)\,x_0 + t\,\epsilon`$ as above.
+
+<p align="center">
+  <img src="assets/flow_map_plane.png" width="100%"><br>
+  <sub>Rows: start time <i>t</i>. Columns: landing time <i>s</i>. Blue is each panel's lowest value and red its
+  highest.</sub>
+</p>
+
+- **(a) Speed.** The average velocity over $`[s, t]`$ has an RMS between 0.92 and 1.20. The full jump from
+  $`t = 1`$ to $`0`$ is the slowest, which is what averaging along a bent path does.
+- **(b) Straightness.** The cosine between the average velocity over $`[s, t]`$ and the instantaneous velocity at
+  $`t`$ is 0.56 for the jump from noise to data, and 0.98 from $`t = 0.125`$. The learned trajectories bend near
+  the noise and are almost straight near the data. That is why a one-step sampler cannot simply follow the
+  velocity it starts with, and needs the flow map TVM trains.
+- **(c) Composition.** A flow map must compose: jumping $`t \to s \to 0`$ has to land where $`t \to 0`$ does.
+  Through $`s = 0.125`$ the two agree to within 0.01 from every $`t`$. Through points closer to the noise they drift
+  apart, by up to 0.22 for $`1 \to 0.875 \to 0`$.
+
+### When each pixel is decided
+
+<p align="center">
+  <img src="assets/decision_time.jpg" width="100%"><br>
+  <sub>One jump to <i>t</i> = 0 from each of 40 start times between 1 and 0.025. A pixel is coloured by the
+  largest <i>t</i> from which every later jump stays within 12/255 of the final image (smoothed over 4 px). Red:
+  decided early, at high noise. Blue: decided late.</sub>
+</p>
+
+Large smooth regions are decided first: the volcano's sky, the orbiter's panels and the pandas' dark fur. Texture
+and edges come last: the lawn, the scree, the shuttle's seams. Averaged over each image, the volcano is decided
+from $`t = 0.62`$, the shuttle from 0.54, the red panda from 0.47 and the lawn-filled retriever image from 0.32.
+
+```bash
+python scripts/analyze_released.py --weights im512_w2p5.safetensors --vae sd-vae-ft-ema.safetensors   # ~6 min
+python scripts/visualize_flow.py --weights im512_w2p5.safetensors --vae sd-vae-ft-ema.safetensors     # ~3 min
+python scripts/analyze_released.py --replot; python scripts/visualize_flow.py --replot   # redraw from runs/
+```
+
 ## Speed on an M4 Max
 
 Measured by [`scripts/sample_released.py`](scripts/sample_released.py) on a Mac Studio M4 Max (32-core GPU,
@@ -212,6 +321,7 @@ Against the reference implementations, given the same weights:
 | check | against | result |
 |---|---|---:|
 | `TVMNet`, **`im512_w2p5` weights**, fp32 on Metal | upstream `DiT_XL_2_18h`, fp32 | 1.4e-5 rel. (5.9e-5 abs.) |
+| `TVMNet`, `im256_w2` / `im256_w1p75` weights (scaled parameterisation) | upstream `DiT_XL_2_18h`, fp32 | 1.4e-6 / 1.2e-6 rel. |
 | `TVMNet`, random DiT-S/2 weights, both parameterisations, CPU and Metal | upstream `DiT` | ≤ 2.6e-6 rel. |
 | SD-VAE decoder, `sd-vae-ft-ema` | diffusers `AutoencoderKL`, fp32 | 5.7e-5 max, 2.5e-6 mean |
 | converter | a pickle written by upstream's own `persistence` module | bit-identical, 164 / 164 tensors |
@@ -314,11 +424,32 @@ net = lucid.compile(pretrained.load("im512_w2p5.safetensors", release.config()))
 decoder = vae.load("sd-vae-ft-ema.safetensors")
 
 noise = lucid.randn(4, 4, 64, 64, device="metal")
-labels = lucid.tensor([88, 207, 387, 980], device="metal")  # macaw, golden retriever, red panda, volcano
+labels = lucid.tensor([88, 207, 387, 980], device="metal")  # macaw, retriever, red panda, volcano
 z = pretrained.sample(net, noise, labels, steps=1, guidance_scale=release.guidance_scale)
 z = pretrained.to_vae_latents(z, release)
 images = [vae.to_pixels(decoder(z[i : i + 1])) for i in range(4)]  # (1, 512, 512, 3) each, 0-255
 ```
+
+### Web app
+
+[`webui/`](webui/) serves a single page for choosing a released model, an ImageNet class and a step count. Open
+it from any device that can reach the Mac, such as a phone on the same Tailscale network. The page:
+
+- loads one model at a time;
+- shows the progress of each jump and of the VAE;
+- offers every image as a PNG to download.
+
+Model switches and generations share one queue, so a model is never swapped under a running generation, and the
+old one is closed before the next loads. Every release whose converted weights are in `--weights-dir` (default
+`~/.cache/tvm_lucid/<release>.safetensors`) can be chosen.
+
+```bash
+LUCID_COREML_CACHE_LIMIT=8G python webui/server.py --vae sd-vae-ft-ema.safetensors \
+    --host "$(tailscale ip -4)" --port 8512
+```
+
+There is no authentication, so bind it to a private address. With the default Core ML backend, a model's
+packages are exported the first time it loads: 18 GiB of host memory for the 512² one, 7 GiB for a 256² one.
 
 ## Repository layout
 
@@ -330,6 +461,9 @@ tvm_lucid/
 scripts/
   convert_released.py   release pickle → SafeTensors, without unpickling
   sample_released.py    released weights: grids and timings on eager / compile / Core ML
+  analyze_released.py   attention, residual stream, flow-map jumps, terminal velocity (the figures above)
+  visualize_flow.py     the learned flow over (t, s), and when each pixel is decided
+webui/            server.py and index.html: the web app; imagenet_classes.json, the 1000 class names
 assets/           README figures
 ```
 
@@ -337,8 +471,8 @@ assets/           README figures
 
 - **The released models are sampled, not evaluated.** No FID-50k is computed here. The table quotes the authors'
   numbers, which were measured under bf16 autocast on their hardware.
-- **Only `im512_w2p5` has been run.** The 256² checkpoints are configured (`--release im256_w2`, `im256_w1p75`)
-  and go through the same converter and name mapping, but neither has been downloaded and sampled here.
+- **The figures and timings are of `im512_w2p5`.** The 256² checkpoints are converted, checked against the
+  reference and sampled (`--release im256_w2`, `im256_w1p75`), but not timed or analysed here.
 - **Core ML at batch 1.** Exporting the 678M network peaks at 18 GiB of host memory at batch 1 and exhausted a
   36 GB Mac at batch 4. Larger batches need more memory than this machine has.
 
