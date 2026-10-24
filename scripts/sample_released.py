@@ -67,6 +67,9 @@ class Backend:
     def decode(self, z: lucid.Tensor) -> lucid.Tensor:
         raise NotImplementedError
 
+    def close(self) -> None:
+        """Release the weights now rather than whenever the object is collected."""
+
 
 class Eager(Backend):
     def __init__(self, args: argparse.Namespace, release: pretrained.Release) -> None:
@@ -79,12 +82,22 @@ class Eager(Backend):
     def decode(self, z: lucid.Tensor) -> lucid.Tensor:
         return self._vae(z)
 
+    def close(self) -> None:
+        self._net = self._vae = None
+        lucid.metal.empty_cache()
+
 
 class Compiled(Eager):
     def __init__(self, args: argparse.Namespace, release: pretrained.Release) -> None:
         super().__init__(args, release)
         self._net = lucid.compile(self._net)
         self._vae = lucid.compile(self._vae)
+
+    def close(self) -> None:
+        for compiled in (self._net, self._vae):
+            if compiled is not None:
+                compiled.clear_cache()
+        super().close()
 
 
 class CoreML(Backend):
@@ -132,6 +145,10 @@ class CoreML(Backend):
 
     def decode(self, z: lucid.Tensor) -> lucid.Tensor:
         return self._vae.predict(z)  # type: ignore[return-value]
+
+    def close(self) -> None:
+        for package in (self._net, self._vae):
+            package.close()
 
 
 BACKENDS = {"eager": Eager, "compile": Compiled, "coreml": CoreML}

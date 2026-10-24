@@ -15,6 +15,7 @@ the network was trained with ``w`` factored out (``do_scale_param``).
 """
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import lucid
@@ -124,12 +125,15 @@ def sample(
     *,
     steps: int,
     guidance_scale: float,
+    on_step: Callable[[int, Tensor], None] | None = None,
 ) -> Tensor:
     r"""Figure 3's sampler: ``steps`` even jumps :math:`x_s = x_t + (s - t)\,u(x_t, t, s)`.
 
     Every input is a tensor, so a compiled or exported ``net`` sees one
     signature per batch size.  Upstream integrates in float64; Metal has
-    no float64, and the sum here is ``steps`` terms long.
+    no float64, and the sum here is ``steps`` terms long.  ``on_step(k, x)``
+    is called after jump ``k`` of ``steps``; on Metal ``x`` may not have been
+    computed yet, so a caller timing it must read it first.
     """
     n, device, dtype = int(noise.shape[0]), noise.device.type, noise.dtype
     guidance = lucid.full((n,), guidance_scale, device=device, dtype=dtype)
@@ -140,6 +144,8 @@ def sample(
             t = lucid.full((n,), t_value, device=device, dtype=dtype)
             s = lucid.full((n,), s_value, device=device, dtype=dtype)
             x = x + (s_value - t_value) * net(x, t, s, labels, guidance)
+            if on_step is not None:
+                on_step(i + 1, x)
     return x
 
 
